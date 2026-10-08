@@ -13,18 +13,6 @@ export const friends = [
   { id: 4, name: 'Ishita Rao', handle: '@ishita', sports: 'Badminton', status: 'online', color: 'mint' }
 ];
 
-export const stats = {
-  games: 24,
-  hosted: 8,
-  rating: 4.7,
-  attendance: 92,
-  sports: [
-    { name: 'Football', games: 12 },
-    { name: 'Badminton', games: 7 },
-    { name: 'Basketball', games: 5 }
-  ]
-};
-
 export const profile = {
   name: 'Sanjay Shashibushan',
   handle: '@sanjay',

@@ -1,40 +1,87 @@
-const SESSION_KEY = 'huddle.mock.session';
-const PROFILE_KEY = 'huddle.mock.profile';
+import { supabase } from "$lib/supabase/client.js";
 
-/** @typedef {{ id: string, name: string, email: string }} MockUser */
+/**
+ * Get the current Supabase auth session.
+ * @returns {Promise<import('@supabase/supabase-js').Session | null>}
+ */
+export async function getSession() {
+  const {
+    data: { session },
+    error,
+  } = await supabase.auth.getSession();
 
-/** @returns {MockUser | null} */
-export function getSession() {
-  if (typeof localStorage === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
+  if (error) {
+    console.error("Failed to get session:", error);
     return null;
   }
+
+  return session;
 }
 
-/** @param {MockUser} user */
-export function setSession(user) {
-  localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+/**
+ * Sign up a user.
+ * @param {string} email
+ * @param {string} password
+ * @param {object} [options]
+ * @returns {Promise<import('@supabase/supabase-js').AuthResponse>}
+ */
+export async function signUp(email, password, options = {}) {
+  return await supabase.auth.signUp({
+    email,
+    password,
+    options,
+  });
 }
 
-export function clearSession() {
-  localStorage.removeItem(SESSION_KEY);
+/**
+ * Sign in a user.
+ * @param {string} email
+ * @param {string} password
+ * @returns {Promise<import('@supabase/supabase-js').AuthResponse>}
+ */
+export async function signIn(email, password) {
+  return await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
 }
 
-/** @returns {Record<string, any> | null} */
-export function getProfile() {
-  if (typeof localStorage === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(PROFILE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+/**
+ * Sign out the current user.
+ * @returns {Promise<{ error: import('@supabase/supabase-js').AuthError | null }>}
+ */
+export async function signOut() {
+  return await supabase.auth.signOut();
 }
 
-/** @param {Record<string, any>} profile */
-export function setProfile(profile) {
-  localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+/**
+ * Send a password reset email.
+ * @param {string} email
+ */
+export async function resetPassword(email) {
+  const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo:
+      typeof window !== "undefined"
+        ? `${window.location.origin}/reset-password`
+        : undefined,
+  });
+
+  return { data, error };
+}
+
+/**
+ * Set a new password for the currently authenticated user.
+ * @param {string} password
+
+ */
+export async function updatePassword(password) {
+  return await supabase.auth.updateUser({ password });
+}
+
+/**
+ * Listen for auth state changes.
+ * @param {(event: import('@supabase/supabase-js').AuthChangeEvent, session: import('@supabase/supabase-js').Session | null) => void} callback
+ */
+export function onAuthStateChange(callback) {
+  return supabase.auth.onAuthStateChange(callback);
 }
