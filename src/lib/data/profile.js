@@ -179,6 +179,10 @@ export async function loadUserProfile(userId) {
 export async function saveProfileBasics(userId, values) {
   const handle = values.handle.trim();
 
+  if (!/^@[a-z0-9_]{2,18}$/.test(handle)) {
+    return { error: new Error('Use a handle with @ followed by 2–18 lowercase letters, numbers or underscores.') };
+  }
+
   if (handle) {
     const { data: conflictingProfile, error: handleLookupError } = await supabase
       .from('profiles')
@@ -205,18 +209,30 @@ export async function saveProfileBasics(userId, values) {
 
 /** @param {string} userId @param {string[]} sports @param {Record<string,string>} skills */
 export async function saveProfileSports(userId, sports, skills) {
-  const { data: sportRows, error: sportError } = await supabase
-    .from('sports')
-    .select('id, name')
-    .in('name', sports);
-  if (sportError) return { error: sportError };
+  // An empty selection is valid (the user may clear all sports). Avoid an
+  // empty `in` filter, which some PostgREST versions reject as malformed.
+  /** @type {{ id: string, name: string }[]} */
+  let sportRows = [];
+  if (sports.length) {
+    const { data, error } = await supabase
+      .from('sports')
+      .select('id, name')
+      .in('name', sports);
+    if (error) return { error };
+    sportRows = data ?? [];
+  }
 
   const skillNames = sports.map((sport) => skills[sport] ?? 'Intermediate');
-  const { data: skillRows, error: skillError } = await supabase
-    .from('skill_levels')
-    .select('code, name')
-    .in('name', skillNames);
-  if (skillError) return { error: skillError };
+  /** @type {{ code: string, name: string }[]} */
+  let skillRows = [];
+  if (skillNames.length) {
+    const { data, error } = await supabase
+      .from('skill_levels')
+      .select('code, name')
+      .in('name', skillNames);
+    if (error) return { error };
+    skillRows = data ?? [];
+  }
 
   const sportIdByName = new Map((sportRows ?? []).map((row) => [row.name, row.id]));
   const skillCodeByName = new Map((skillRows ?? []).map((row) => [row.name, row.code]));
@@ -230,14 +246,36 @@ export async function saveProfileSports(userId, sports, skills) {
     return { error: new Error('Could not match one or more sports or skill levels.') };
   }
 
-  const { error: deleteError } = await supabase
+  // Save new selections before removing old ones. If the write fails, the current
+  // profile-sport rows remain intact instead of being deleted first.
+  const { data: existingRows, error: existingError } = await supabase
     .from('profile_sports')
-    .delete()
+    .select('sport_id')
     .eq('profile_id', userId);
-  if (deleteError) return { error: deleteError };
+  if (existingError) return { error: existingError };
 
-  const { error: insertError } = await supabase.from('profile_sports').insert(rows);
-  return { error: insertError };
+  if (rows.length) {
+    const { error: upsertError } = await supabase
+      .from('profile_sports')
+      .upsert(rows, { onConflict: 'profile_id,sport_id' });
+    if (upsertError) return { error: upsertError };
+  }
+
+  const retainedSportIds = new Set(rows.map((row) => row.sport_id));
+  const obsoleteSportIds = (existingRows ?? [])
+    .map((row) => row.sport_id)
+    .filter((sportId) => !retainedSportIds.has(sportId));
+
+  if (obsoleteSportIds.length) {
+    const { error: cleanupError } = await supabase
+      .from('profile_sports')
+      .delete()
+      .eq('profile_id', userId)
+      .in('sport_id', obsoleteSportIds);
+    if (cleanupError) return { error: cleanupError };
+  }
+
+  return { error: null };
 }
 
 /** @param {string} userId @param {{eventNotifications:boolean,friendNotifications:boolean,ratingNotifications:boolean}} values */

@@ -10,14 +10,18 @@
   <button class="card-main" type="button" onclick={onOpen} aria-label={`Open ${event.title}`}>
     <div class="topline"><span>{event.sport}</span><span>{event.status === 'full' ? 'FULL' : event.skill}</span></div>
     <h3>{event.title}</h3>
-    <div class="meta"><span><Icon name="calendar" size={15} />{event.date}</span><span><Icon name="map" size={15} />{event.location}</span></div>
+    <div class="meta"><span><Icon name="calendar" size={15} />{event.date}</span>{#if event.visibility !== 'Private' || event.isMember}<span><Icon name="map" size={15} />{event.location}</span>{/if}</div>
     <div class="progress-wrap">
       <div class="progress"><span style={`width:${progress}%`}></span></div>
       <strong>{event.members}/{event.capacity}</strong>
     </div>
   </button>
   <div class="footer">
-    <span>Hosted by <button type="button" class="host-link" onclick={(clickEvent) => { clickEvent.stopPropagation(); onHostClick(); }}>{event.host}</button></span>
+    {#if event.visibility === 'Private' && !event.isMember}
+      <span>Hosted by Private host</span>
+    {:else}
+      <span>Hosted by <button type="button" class="host-link" onclick={(clickEvent) => { clickEvent.stopPropagation(); onHostClick(); }}>{event.host}</button></span>
+    {/if}
     <span class="arrow"><Icon name="chevron" size={17} /></span>
   </div>
 </article>

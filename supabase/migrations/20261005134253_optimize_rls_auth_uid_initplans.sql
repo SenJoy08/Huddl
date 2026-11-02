@@ -1,3 +1,4 @@
+
 -- Supabase recommends wrapping auth.uid()/auth.jwt() calls in a SELECT
 -- subquery inside RLS policies so PostgreSQL can evaluate them once per
 -- statement instead of repeatedly for every row.
@@ -46,3 +47,4 @@ begin
     execute stmt;
   end loop;
 end $$;
+;

@@ -4,7 +4,7 @@ import { supabase } from '$lib/supabase/client.js';
 /** @typedef {{ id: string, event_id: string, user_id: string, status: string }} EventRequestRow */
 /** @typedef {{ id: string, display_name: string|null, handle: string|null }} ProfileRow */
 
-/** @typedef {{ id: string, eventType: 'sport' | 'esports', sport: string, gameId?: string, title: string, startsAt: string, date: string, dateValue: string, time: string, location: string, host: string, hostId: string, members: number, capacity: number, skill: string, color: string, description: string, visibility: string, status: string, pendingRequests: number, pendingRequestId?: string|null, isMember: boolean, ratingsSubmitted?: boolean, platform?: string|null, gameMode?: string|null, memberProfiles?: { id:string,name:string,handle:string,color:string }[] }} HuddlEvent */
+/** @typedef {{ id: string, eventType: 'sport' | 'esports', sport: string, gameId?: string, title: string, date: string, dateValue: string, time: string, location: string, host: string, hostId: string, members: number, capacity: number, skill: string, color: string, description: string, visibility: string, status: string, pendingRequests: number, pendingRequestId?: string|null, isMember: boolean, ratingsSubmitted?: boolean, platform?: string|null, gameMode?: string|null, memberProfiles?: { id:string,name:string,handle:string,color:string }[] }} HuddlEvent */
 
 /** @type {Record<string, string>} */
 const COLOR_BY_SPORT = {
@@ -54,6 +54,20 @@ function displayDateTimeFromTimestamp(value) {
   return `${dateText}, ${timeText}`;
 }
 
+/** @param {string} dateValue @param {string} timeValue */
+function startsAtIso(dateValue, timeValue) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue) || !/^\d{2}:\d{2}$/.test(timeValue)) {
+    throw new Error('Choose a valid date and time.');
+  }
+  const [year, month, day] = dateValue.split('-').map(Number);
+  const [hours, minutes] = timeValue.split(':').map(Number);
+  const date = new Date(year, month - 1, day, hours, minutes, 0, 0);
+  const isExact = date.getFullYear() === year && date.getMonth() === month - 1
+    && date.getDate() === day && date.getHours() === hours && date.getMinutes() === minutes;
+  if (!isExact || date.getTime() <= Date.now()) throw new Error('Choose a date and time in the future.');
+  return date.toISOString();
+}
+
 /**
  * Convert raw event rows plus their related records into the shape used by Huddl.
  * @param {Array<Record<string, any>>} eventRows
@@ -64,7 +78,7 @@ async function hydrateEvents(eventRows, userId) {
   if (!eventRows?.length) return [];
 
   const eventIds = eventRows.map((row) => row.id);
-  const hostIds = [...new Set(eventRows.map((row) => row.host_id))];
+  const hostIds = [...new Set(eventRows.map((row) => row.host_id).filter(Boolean))];
 
   const [sportResult, esportsResult, memberResult, requestResult, hostResult] = await Promise.all([
     supabase.from('event_sports').select('event_id, sport_id, skill_level_code').in('event_id', eventIds),
@@ -82,11 +96,10 @@ async function hydrateEvents(eventRows, userId) {
       eventType: row.event_type_code === 'esports' ? 'esports' : 'sport',
       sport: row.event_type_code === 'esports' ? 'Esports' : 'Sport',
       title: row.title,
-      startsAt: row.starts_at,
       date: displayDateTimeFromTimestamp(row.starts_at),
       dateValue: dateValueFromTimestamp(row.starts_at),
       time: timeValueFromTimestamp(row.starts_at),
-      location: row.location_name ?? 'Location not set',
+      location: row.location_name ?? 'Location shared after joining',
       host: 'Player',
       hostId: row.host_id,
       members: 0,
@@ -181,11 +194,10 @@ async function hydrateEvents(eventRows, userId) {
       sport: label,
       gameId: game?.id,
       title: row.title,
-      startsAt: row.starts_at,
       date: displayDateTimeFromTimestamp(row.starts_at),
       dateValue: dateValueFromTimestamp(row.starts_at),
       time: timeValueFromTimestamp(row.starts_at),
-      location: row.location_name ?? 'Location not set',
+      location: row.location_name ?? 'Location shared after joining',
       host,
       hostId: row.host_id,
       members: members.length,
@@ -197,7 +209,7 @@ async function hydrateEvents(eventRows, userId) {
       status: row.status,
       pendingRequests: pendingRequests.filter(/** @param {EventRequestRow} request */ (request) => request.user_id !== userId).length,
       pendingRequestId: pendingRequests.find(/** @param {EventRequestRow} request */ (request) => request.user_id !== userId)?.id ?? null,
-      isMember: members.some(/** @param {EventMemberRow} member */ (member) => member.user_id === userId),
+      isMember: row.host_id === userId || members.some(/** @param {EventMemberRow} member */ (member) => member.user_id === userId),
       ratingsSubmitted: Boolean(row.host_rated_at),
       platform: isEsports ? (esportsRow?.platform ?? game?.platform ?? null) : null,
       gameMode: isEsports ? esportsRow?.game_mode ?? null : null,
@@ -212,14 +224,7 @@ async function hydrateEvents(eventRows, userId) {
  * @returns {Promise<HuddlEvent[]>}
  */
 export async function loadSportEvents(userId) {
-  const { data: eventRows, error: eventError } = await supabase
-    .from('events')
-    .select('id, event_type_code, host_id, title, description, starts_at, location_name, capacity, visibility, status, host_rated_at')
-    .in('event_type_code', ['sport', 'esports'])
-    .in('status', ['upcoming', 'full'])
-    .gt('starts_at', new Date().toISOString())
-    .order('starts_at', { ascending: true })
-    .limit(100);
+  const { data: eventRows, error: eventError } = await supabase.rpc('get_discoverable_events');
 
   if (eventError) throw eventError;
   return hydrateEvents(eventRows ?? [], userId);
@@ -233,27 +238,7 @@ export async function loadSportEvents(userId) {
  * @returns {Promise<HuddlEvent[]>}
  */
 export async function loadUserEvents(userId) {
-  const [hostResult, memberResult] = await Promise.all([
-    supabase.from('events').select('id').eq('host_id', userId),
-    supabase.from('event_members').select('event_id').eq('user_id', userId)
-  ]);
-
-  if (hostResult.error) throw hostResult.error;
-  if (memberResult.error) throw memberResult.error;
-
-  const eventIds = [...new Set([
-    ...(hostResult.data ?? []).map((row) => row.id),
-    ...(memberResult.data ?? []).map((row) => row.event_id)
-  ])];
-
-  if (!eventIds.length) return [];
-
-  const { data: eventRows, error: eventError } = await supabase
-    .from('events')
-    .select('id, event_type_code, host_id, title, description, starts_at, location_name, capacity, visibility, status, host_rated_at')
-    .in('id', eventIds)
-    .in('event_type_code', ['sport', 'esports'])
-    .order('starts_at', { ascending: false });
+  const { data: eventRows, error: eventError } = await supabase.rpc('get_my_events');
 
   if (eventError) throw eventError;
   return hydrateEvents(eventRows ?? [], userId);
@@ -271,7 +256,7 @@ export async function createSportEvent(form) {
   if (!sportRow?.id) throw new Error('Selected sport is unavailable.');
   if (!skillRow?.code) throw new Error('Selected skill level is unavailable.');
 
-  const startsAt = new Date(`${form.dateValue}T${form.time}:00`).toISOString();
+  const startsAt = startsAtIso(form.dateValue, form.time);
   const { data: eventId, error } = await supabase.rpc('create_sport_event', {
     p_title: form.title.trim(),
     p_description: form.description?.trim() || null,
@@ -309,7 +294,7 @@ export async function createEsportsEvent(form) {
   if (!gameRow?.id) throw new Error('Selected esports game is unavailable.');
   if (!skillRow?.code) throw new Error('Selected skill level is unavailable.');
 
-  const startsAt = new Date(`${form.dateValue}T${form.time}:00`).toISOString();
+  const startsAt = startsAtIso(form.dateValue, form.time);
   const { data: eventId, error } = await supabase.rpc('create_esports_event', {
     p_title: form.title.trim(),
     p_description: form.description?.trim() || null,
@@ -362,33 +347,19 @@ export async function updateSportEvent(eventId, form) {
   if (!sportRow?.id) throw new Error('Selected sport is unavailable.');
   if (!skillRow?.code) throw new Error('Selected skill level is unavailable.');
 
-  const startsAt = new Date(`${form.dateValue}T${form.time}:00`).toISOString();
-  const { error: eventError } = await supabase
-    .from('events')
-    .update({
-      title: form.title.trim(),
-      description: form.description?.trim() || null,
-      starts_at: startsAt,
-      location_name: form.location.trim(),
-      capacity: Number(form.capacity),
-      visibility: form.visibility === 'Private' ? 'private' : 'public'
-    })
-    .eq('id', eventId);
-
-  if (eventError) throw eventError;
-
-  const { error: sportUpdateError } = await supabase
-    .from('event_sports')
-    .upsert(
-      {
-        event_id: eventId,
-        sport_id: sportRow.id,
-        skill_level_code: skillRow.code
-      },
-      { onConflict: 'event_id' }
-    );
-
-  if (sportUpdateError) throw sportUpdateError;
+  const startsAt = startsAtIso(form.dateValue, form.time);
+  const { error } = await supabase.rpc('update_sport_event', {
+    p_event_id: eventId,
+    p_title: form.title.trim(),
+    p_description: form.description?.trim() || null,
+    p_starts_at: startsAt,
+    p_location_name: form.location.trim(),
+    p_capacity: Number(form.capacity),
+    p_visibility: form.visibility === 'Private' ? 'private' : 'public',
+    p_sport_id: sportRow.id,
+    p_skill_level_code: skillRow.code
+  });
+  if (error) throw error;
 }
 
 
@@ -412,30 +383,21 @@ export async function updateEsportsEvent(eventId, form) {
   if (!gameRow?.id) throw new Error('Selected esports game is unavailable.');
   if (!skillRow?.code) throw new Error('Selected skill level is unavailable.');
 
-  const startsAt = new Date(`${form.dateValue}T${form.time}:00`).toISOString();
-  const { error: eventError } = await supabase
-    .from('events')
-    .update({
-      title: form.title.trim(),
-      description: form.description?.trim() || null,
-      starts_at: startsAt,
-      location_name: form.location.trim(),
-      capacity: Number(form.capacity),
-      visibility: form.visibility === 'Private' ? 'private' : 'public'
-    })
-    .eq('id', eventId);
-  if (eventError) throw eventError;
-
-  const { error: esportsError } = await supabase
-    .from('event_esports')
-    .upsert({
-      event_id: eventId,
-      game_id: gameRow.id,
-      platform: form.platform?.trim() || gameRow.platform || null,
-      game_mode: form.gameMode?.trim() || null,
-      skill_level_code: skillRow.code
-    }, { onConflict: 'event_id' });
-  if (esportsError) throw esportsError;
+  const startsAt = startsAtIso(form.dateValue, form.time);
+  const { error } = await supabase.rpc('update_esports_event', {
+    p_event_id: eventId,
+    p_title: form.title.trim(),
+    p_description: form.description?.trim() || null,
+    p_starts_at: startsAt,
+    p_location_name: form.location.trim(),
+    p_capacity: Number(form.capacity),
+    p_visibility: form.visibility === 'Private' ? 'private' : 'public',
+    p_game_id: gameRow.id,
+    p_platform: form.platform?.trim() || gameRow.platform || null,
+    p_game_mode: form.gameMode?.trim() || null,
+    p_skill_level_code: skillRow.code
+  });
+  if (error) throw error;
 }
 
 /** @param {string} eventId @param {'completed'|'cancelled'} status */
@@ -448,13 +410,12 @@ export async function setEventStatus(eventId, status) {
     return data;
   }
 
-  const { error } = await supabase
-    .from('events')
-    .update({ status })
-    .eq('id', eventId);
-
+  if (status !== 'cancelled') throw new Error('Unsupported event status change.');
+  const { data, error } = await supabase.rpc('cancel_event', {
+    p_event_id: eventId
+  });
   if (error) throw error;
-  return status;
+  return data;
 }
 
 /** @param {string} requestId @param {boolean} accept */
