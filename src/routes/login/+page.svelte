@@ -11,6 +11,7 @@
   let email = '';
   let password = '';
   let error = '';
+  let notice = '';
   let loading = false;
   let showPassword = false;
 
@@ -24,6 +25,7 @@
 
   async function login() {
     error = '';
+    notice = '';
 
     const cleanEmail = email.trim();
 
@@ -37,22 +39,27 @@
       return;
     }
 
+    if (loading) return;
     loading = true;
 
-    const { error: authError } = await signIn(cleanEmail, password);
-
-    loading = false;
-
-    if (authError) {
-      error = authError.message;
-      return;
+    try {
+      const { error: authError } = await signIn(cleanEmail, password);
+      if (authError) {
+        error = authError.message || 'Could not log in. Check your details and try again.';
+        return;
+      }
+      goto('/');
+    } catch (loginError) {
+      console.error('Login failed:', loginError);
+      error = 'Could not log in right now. Check your connection and try again.';
+    } finally {
+      loading = false;
     }
-
-    goto('/');
   }
 
   async function handleForgotPassword() {
     error = '';
+    notice = '';
 
     const cleanEmail = email.trim();
 
@@ -61,18 +68,22 @@
       return;
     }
 
+    if (loading) return;
     loading = true;
 
-    const { error: resetError } = await resetPassword(cleanEmail);
-
-    loading = false;
-
-    if (resetError) {
-      error = resetError.message;
-      return;
+    try {
+      const { error: resetError } = await resetPassword(cleanEmail);
+      if (resetError) {
+        error = resetError.message || 'Could not send the password reset email.';
+        return;
+      }
+      notice = 'Password reset email sent. Check your inbox.';
+    } catch (resetError) {
+      console.error('Password reset request failed:', resetError);
+      error = 'Could not send the reset email right now. Check your connection and try again.';
+    } finally {
+      loading = false;
     }
-
-    alert('Password reset email sent. Check your inbox.');
   }
 </script>
 
@@ -110,7 +121,11 @@
     </label>
 
     {#if error}
-      <p class="error">{error}</p>
+      <p class="error" role="alert">{error}</p>
+    {/if}
+
+    {#if notice}
+      <p class="notice" role="status">{notice}</p>
     {/if}
 
     <button class="primary" type="submit" disabled={loading}>
@@ -135,5 +150,5 @@
 </AuthShell>
 
 <style>
-  .form{display:grid;gap:14px;margin-top:22px}.form label{display:grid;gap:6px;font:800 11px Quicksand}.form input{height:47px;width:100%;border:2px solid #171717;border-radius:15px;background:#fff;padding:0 12px;outline:0;font:700 13px Quicksand}.form input:disabled{opacity:.65}.password{display:flex;gap:7px}.password input{min-width:0}.password button{border:2px solid #171717;border-radius:13px;background:#f3f3f3;padding:0 10px;font:800 10px Quicksand}.password button:disabled,.primary:disabled,.secondary:disabled,.link-button:disabled{opacity:.55;cursor:not-allowed}.primary,.secondary{width:100%;border:2px solid #171717;border-radius:17px;padding:14px;font:900 13px Quicksand}.primary{background:#171717;color:#fff;box-shadow:-4px 5px 0 #a1a2a4}.secondary{background:#fff}.link-button{border:0;background:transparent;color:#555;font:800 11px Quicksand;padding:1px}.error{margin:-3px 0 0;color:#a13d3d;font:800 11px Quicksand}.divider{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:9px;margin:20px 0 13px}.divider span{height:1px;background:#ddd}.divider small{color:#888;font:800 9px Quicksand;letter-spacing:.08em}
+  .form{display:grid;gap:14px;margin-top:22px}.form label{display:grid;gap:6px;font:800 11px Quicksand}.form input{height:47px;width:100%;border:2px solid #171717;border-radius:15px;background:#fff;padding:0 12px;outline:0;font:700 13px Quicksand}.form input:disabled{opacity:.65}.password{display:flex;gap:7px}.password input{min-width:0}.password button{border:2px solid #171717;border-radius:13px;background:#f3f3f3;padding:0 10px;font:800 10px Quicksand}.password button:disabled,.primary:disabled,.secondary:disabled,.link-button:disabled{opacity:.55;cursor:not-allowed}.primary,.secondary{width:100%;border:2px solid #171717;border-radius:17px;padding:14px;font:900 13px Quicksand}.primary{background:#171717;color:#fff;box-shadow:-4px 5px 0 #a1a2a4}.secondary{background:#fff}.link-button{border:0;background:transparent;color:#555;font:800 11px Quicksand;padding:1px}.notice{margin:-3px 0 0;color:#31734d;font:800 11px Quicksand}.error{margin:-3px 0 0;color:#a13d3d;font:800 11px Quicksand}.divider{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:9px;margin:20px 0 13px}.divider span{height:1px;background:#ddd}.divider small{color:#888;font:800 9px Quicksand;letter-spacing:.08em}
 </style>

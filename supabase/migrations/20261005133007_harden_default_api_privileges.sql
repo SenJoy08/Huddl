@@ -1,3 +1,4 @@
+
 -- Prevent future public-schema objects from becoming API-reachable merely
 -- because PostgreSQL's default PUBLIC/role grants were applied.
 alter default privileges for role postgres in schema public
@@ -25,3 +26,4 @@ grant execute on function private.is_discoverable_event(uuid) to authenticated;
 grant execute on function private.is_event_host(uuid) to authenticated;
 grant execute on function private.is_event_member(uuid) to authenticated;
 grant execute on function private.is_public_event(uuid) to authenticated;
+;

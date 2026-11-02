@@ -86,10 +86,14 @@ export async function markNotificationRead(notificationId) {
 
 /** Mark every notification belonging to the authenticated user as read. */
 export async function markAllNotificationsRead() {
+  const { data: authData, error: authError } = await supabase.auth.getUser();
+  if (authError) throw authError;
+  if (!authData.user?.id) throw new Error('Sign in to update notifications.');
+
   const { error } = await supabase
     .from('notifications')
     .update({ read: true })
-    .eq('recipient_id', (await supabase.auth.getUser()).data.user?.id ?? '00000000-0000-0000-0000-000000000000')
+    .eq('recipient_id', authData.user.id)
     .eq('read', false);
 
   if (error) throw error;

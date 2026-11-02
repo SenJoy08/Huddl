@@ -1,5 +1,3 @@
--- Keep decide_event_join_request() fully RLS-controlled under SECURITY INVOKER.
--- The request row already exists, so update it instead of INSERT ... ON CONFLICT.
 
 create or replace function public.decide_event_join_request(
   p_request_id uuid,
@@ -7,9 +5,9 @@ create or replace function public.decide_event_join_request(
 )
 returns text
 language plpgsql
-security invoker
+security definer
 set search_path = public, pg_catalog
-as $function$
+as $$
 declare
   v_request public.event_join_requests%rowtype;
   v_event public.events%rowtype;
@@ -19,7 +17,8 @@ begin
     raise exception 'Not authenticated';
   end if;
 
-  select * into v_request
+  select *
+  into v_request
   from public.event_join_requests
   where id = p_request_id
   for update;
@@ -28,7 +27,8 @@ begin
     raise exception 'Join request not found';
   end if;
 
-  select * into v_event
+  select *
+  into v_event
   from public.events
   where id = v_request.event_id
   for update;
@@ -47,40 +47,45 @@ begin
 
   if not p_accept then
     update public.event_join_requests
-    set status = 'declined',
-        decided_at = now()
+    set status = 'declined', decided_at = now()
     where id = p_request_id;
+
     return 'declined';
   end if;
 
-  select count(*) into v_member_count
+  select count(*)
+  into v_member_count
   from public.event_members
   where event_id = v_event.id;
 
   if v_member_count >= v_event.capacity then
     update public.events
-    set status = 'full',
-        updated_at = now()
+    set status = 'full', updated_at = now()
     where id = v_event.id;
+
     raise exception 'Event is full';
   end if;
-
-  update public.event_join_requests
-  set status = 'accepted',
-      decided_at = now()
-  where id = p_request_id;
 
   insert into public.event_members (event_id, user_id, role)
   values (v_event.id, v_request.user_id, 'member')
   on conflict (event_id, user_id) do nothing;
 
+  update public.event_join_requests
+  set status = 'accepted', decided_at = now()
+  where id = p_request_id;
+
   v_member_count := v_member_count + 1;
 
   update public.events
-  set status = case when v_member_count >= capacity then 'full' else 'upcoming' end,
-      updated_at = now()
+  set
+    status = case when v_member_count >= capacity then 'full' else 'upcoming' end,
+    updated_at = now()
   where id = v_event.id;
 
   return 'accepted';
 end;
-$function$;
+$$;
+
+revoke all on function public.decide_event_join_request(uuid,boolean) from public, anon;
+grant execute on function public.decide_event_join_request(uuid,boolean) to authenticated;
+;

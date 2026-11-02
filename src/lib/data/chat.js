@@ -33,7 +33,8 @@ export async function loadEventMessages(eventId, userId) {
     .from('event_messages')
     .select('id, event_id, sender_id, body, created_at, edited_at, deleted_at')
     .eq('event_id', eventId)
-    .order('created_at', { ascending: true })
+    // Fetch the newest messages first so busy chats don't become stuck on old history.
+    .order('created_at', { ascending: false })
     .limit(200);
 
   if (error) throw error;
@@ -57,6 +58,7 @@ export async function loadEventMessages(eventId, userId) {
 
   return rows
     .filter(/** @param {any} row */ (row) => !row.deleted_at)
+    .reverse()
     .map(/** @param {any} row */ (row) => shapeMessage(row, names, userId));
 }
 

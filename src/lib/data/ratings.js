@@ -21,12 +21,12 @@ import { supabase } from '$lib/supabase/client.js';
  * @returns {Promise<RatingPlayer[]>}
  */
 export async function loadRatingPlayers(eventId, userId) {
-  const [memberResult, ratingResult] = await Promise.all([
+  const [eventResult, memberResult, ratingResult] = await Promise.all([
+    supabase.rpc('get_event_rating_context', { p_event_id: eventId }),
     supabase
       .from('event_members')
       .select('user_id, role')
-      .eq('event_id', eventId)
-      .neq('user_id', userId),
+      .eq('event_id', eventId),
     supabase
       .from('ratings')
       .select('ratee_id, score, showed_up, skill_match, note')
@@ -34,10 +34,18 @@ export async function loadRatingPlayers(eventId, userId) {
       .eq('rater_id', userId)
   ]);
 
-  const firstError = memberResult.error ?? ratingResult.error;
+  const firstError = eventResult.error ?? memberResult.error ?? ratingResult.error;
   if (firstError) throw firstError;
+  const eventContext = eventResult.data?.[0];
+  if (!eventContext) throw new Error('Only participants can rate a completed event.');
+  if (eventContext.status !== 'completed') throw new Error('Ratings are available after the event is completed.');
 
-  const memberRows = memberResult.data ?? [];
+  const allMembers = memberResult.data ?? [];
+  if (!allMembers.some((member) => member.user_id === userId)) {
+    throw new Error('Only event participants can rate players.');
+  }
+  const isHost = eventContext.host_id === userId;
+  const memberRows = allMembers.filter((member) => member.user_id !== userId);
   if (!memberRows.length) return [];
 
   const playerIds = memberRows.map((row) => row.user_id);
@@ -65,8 +73,8 @@ export async function loadRatingPlayers(eventId, userId) {
       showedUp: existing?.showed_up ?? true,
       skillMatch: existing?.skill_match ?? true,
       note: existing?.note ?? '',
-      // The current rating flow is host-only, so the caller may mark attendance.
-      canMarkAttendance: true
+      // Participants can submit stars; attendance and skill-match are host-only.
+      canMarkAttendance: isHost
     };
   });
 }
@@ -95,18 +103,14 @@ export async function submitPlayerRating(rating) {
 
 /**
  * Persist that the event host has completed the post-game rating step.
- * The database RLS policy ensures only the event host can update this field.
+ * A database RPC validates host ownership and completed-event status.
  * @param {string} eventId
  * @returns {Promise<void>}
  */
 export async function markHostRatingsComplete(eventId) {
-  const { data, error } = await supabase
-    .from('events')
-    .update({ host_rated_at: new Date().toISOString() })
-    .eq('id', eventId)
-    .select('id')
-    .maybeSingle();
+  const { error } = await supabase.rpc('mark_host_ratings_complete', {
+    p_event_id: eventId
+  });
 
   if (error) throw error;
-  if (!data?.id) throw new Error('Only the event host can complete ratings.');
 }

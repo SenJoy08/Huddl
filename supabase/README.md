@@ -1,10 +1,8 @@
-# Huddl Backend — Hibernating Foundation
+# Huddl Supabase Backend
 
-This directory is deliberately **not connected to the Svelte frontend yet**.
+The Supabase backend is now live and is the production data source for the Svelte 5 frontend.
 
-The purpose is to freeze the backend architecture now so that later implementation can be done against a stable, scalable model without redesigning the app around sports-only assumptions.
-
-## Core model
+## Current architecture
 
 `events` is the generic object. Event categories are data-driven through `event_types`:
 
@@ -19,7 +17,7 @@ Type-specific information lives in dedicated one-to-one tables:
 - `event_esports`
 - `event_gatherings`
 
-Shared systems remain reusable across all event types:
+Shared systems remain reusable across event types:
 
 - membership
 - join requests
@@ -29,15 +27,7 @@ Shared systems remain reusable across all event types:
 - ratings/attendance
 - teams
 
-## Future expansion
-
-Adding another sport or esports game is intended to be a data change, not a schema rewrite. A new event category can be introduced by adding a new `event_types` row and, when it needs unique fields, one new subtype table.
-
-Teams are already represented generically so esports can later support team formation without replacing the event membership model.
-
-Ratings intentionally allow `score = NULL` when `showed_up = false`, matching Huddl's current no-show behavior.
-
-The five skill levels are seeded as:
+The five skill levels are:
 
 1. Beginner
 2. Amateur
@@ -45,15 +35,20 @@ The five skill levels are seeded as:
 4. Seasoned
 5. Professional
 
-## Included sport seed data
+## Production hardening already applied
 
-Football, Volleyball, Tennis, Basketball, Badminton, Chess, Pool, Table Tennis, Cricket, Futsal, Squash, Box Cricket.
+The live project currently has RLS enabled across the application tables, authenticated RPC permissions hardened, realtime enabled for the event/social tables, and public player statistics exposed through a dedicated RPC.
 
-## What is intentionally *not* happening yet
+Private profile contact fields are not selectable by authenticated clients. The public `profiles` API exposes only the public profile columns, while the signed-in user's phone/contact-visibility settings are read through a locked RPC backed by a private `SECURITY DEFINER` helper.
 
-- No Supabase project is connected.
-- No runtime Supabase client is added to Huddl.
-- No existing mock/local frontend behavior is replaced.
-- No production credentials or environment variables are required.
+The public player statistics RPC includes both regular sports and esports activity.
 
-When backend implementation begins, the migration can be applied first, followed by replacing the current local session/data services feature-by-feature.
+## Migration note
+
+The live Supabase project contains additional migration history from the earlier backend implementation than is present in this archive. The live database is currently authoritative. Before the production deployment is treated as reproducible from a clean checkout, the remaining historical migrations should be pulled/reconciled into `supabase/migrations/` using the Supabase CLI.
+
+Do not hand-edit the live migration history. New schema changes should be added as normal forward migrations.
+
+The file `20261009041000_final_access_guardrails.sql` is a candidate forward migration from the final code audit. It has **not** been applied to the production database or tested against a staging copy in this delivery. It intentionally changes client table-write permissions and routes membership, lifecycle, and rating writes through guarded RPCs. Review it against the live schema, apply it in staging, and test the full join/leave/request/complete/rating flows before applying to production.
+
+V2 adds `20261018090000_private_event_preview_and_access.sql`. It protects event details with column grants and member-aware RPCs, makes event edits transactional, routes friend writes through checked functions, and makes event messages append-only for clients. The migration depends on the existing historical schema and the `host_rated_at` guardrail. Reconcile the archived migration history, apply the existing guardrail prerequisites in staging, then apply this migration and verify the app against that staging database before production rollout. The new RPC names and parameters are implemented in the V2 client; deploying the client without the migration will make event discovery and edits fail.
