@@ -1,4 +1,6 @@
 import { supabase } from '$lib/supabase/client.js';
+import { normalizeProfileHandle } from './profile-handle.js';
+export { normalizeProfileHandle };
 
 /**
  * @typedef {{
@@ -177,10 +179,11 @@ export async function loadUserProfile(userId) {
 
 /** @param {string} userId @param {{name:string,handle:string,bio:string}} values */
 export async function saveProfileBasics(userId, values) {
-  const handle = values.handle.trim();
-
-  if (!/^@[a-z0-9_]{2,18}$/.test(handle)) {
-    return { error: new Error('Use a handle with @ followed by 2–18 lowercase letters, numbers or underscores.') };
+  let handle;
+  try {
+    handle = normalizeProfileHandle(values.handle);
+  } catch (error) {
+    return { error };
   }
 
   if (handle) {
@@ -195,16 +198,20 @@ export async function saveProfileBasics(userId, values) {
     if (conflictingProfile) return { error: new Error('That handle is already taken.') };
   }
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('profiles')
     .update({
       display_name: values.name,
       handle,
       bio: values.bio
     })
-    .eq('id', userId);
+    .eq('id', userId)
+    .select('id')
+    .maybeSingle();
 
-  return { error };
+  if (error) return { error };
+  if (!data) return { error: new Error('Your profile could not be found. Refresh the app and sign in again.') };
+  return { error: null, handle };
 }
 
 /** @param {string} userId @param {string[]} sports @param {Record<string,string>} skills */

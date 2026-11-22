@@ -5,6 +5,7 @@
   import { getSession, signOut } from '$lib/auth/session.js';
   import { supabase } from '$lib/supabase/client.js';
   import { saveProfileSports } from '$lib/data/profile.js';
+  import { mapProfileSports } from '$lib/onboarding/profile-sports.js';
 
   const sports = ['Football', 'Volleyball', 'Tennis', 'Basketball', 'Badminton', 'Chess', 'Pool', 'Table Tennis', 'Cricket', 'Futsal', 'Squash', 'Box Cricket'];
   const levels = ['Beginner', 'Amateur', 'Intermediate', 'Seasoned', 'Professional'];
@@ -38,41 +39,25 @@
     user = {
       id: authSession.user.id,
       name:
+        authSession.user.user_metadata?.display_name ??
         authSession.user.user_metadata?.name ??
         authSession.user.email?.split('@')[0] ??
         'Player',
       email: authSession.user.email ?? ''
     };
 
-    const [{ data: existingProfile }, { data: existingSports }] = await Promise.all([
-      supabase
-        .from('profiles')
-        .select('display_name, handle, bio')
-        .eq('id', user.id)
-        .maybeSingle(),
-      supabase
-        .from('profile_sports')
-        .select('sport_id, skill_level_code, sports(name), skill_levels(name)')
-        .eq('profile_id', user.id)
-    ]);
+    const { data: existingSports, error: existingSportsError } = await supabase
+      .from('profile_sports')
+      .select('sport_id, skill_level_code, sports(name), skill_levels(name)')
+      .eq('profile_id', user.id);
 
-    if (existingProfile?.display_name) {
-      user = { ...user, name: existingProfile.display_name };
+    if (existingSportsError) {
+      error = userFacingError(existingSportsError, 'Could not load your saved sports. Please try again.');
+      return;
     }
 
     if (existingSports?.length) {
-      selected = existingSports
-        .map((row) => row.sports?.[0]?.name)
-        .filter(Boolean);
-
-      skills = Object.fromEntries(
-        existingSports
-          .filter((row) => row.sports?.[0]?.name)
-          .map((row) => [
-            row.sports[0].name,
-            row.skill_levels?.[0]?.name ?? 'Intermediate'
-          ])
-      );
+      ({ selected, skills } = mapProfileSports(existingSports));
     }
   });
 

@@ -305,7 +305,8 @@ export async function createEsportsEvent(form) {
     p_game_id: gameRow.id,
     p_platform: form.platform?.trim() || gameRow.platform || null,
     p_game_mode: form.gameMode?.trim() || null,
-    p_skill_level_code: skillRow.code
+    p_skill_level_code: skillRow.code,
+    p_team_size: null
   });
 
   if (error) throw error;

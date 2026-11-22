@@ -24,7 +24,25 @@
       return;
     }
 
-    const safeNext = next.startsWith('/') ? next : '/onboarding';
+    const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/onboarding';
+    const { data: authData } = await supabase.auth.getUser();
+    if (authData.user) {
+      const { data: savedSports, error: sportsError } = await supabase
+        .from('profile_sports')
+        .select('sport_id')
+        .eq('profile_id', authData.user.id)
+        .limit(1);
+      // A read failure should fall back to the app's normal profile gate.
+      // The gate sends incomplete accounts to onboarding.
+      if (sportsError) {
+        goto('/');
+        return;
+      }
+      if (savedSports?.length) {
+        goto('/');
+        return;
+      }
+    }
     goto(safeNext);
   });
 </script>

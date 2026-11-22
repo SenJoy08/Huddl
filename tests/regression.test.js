@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+import { mergeChatMessage } from '../src/lib/data/chat-message-utils.js';
+import { normalizeProfileHandle } from '../src/lib/data/profile-handle.js';
+import { mapProfileSports } from '../src/lib/onboarding/profile-sports.js';
+
+test('profile handles normalize uppercase and preserve existing limits', () => {
+  assert.equal(normalizeProfileHandle('  @Huddl_Player '), '@huddl_player');
+  assert.throws(() => normalizeProfileHandle('@@Huddl_Player'), /2-18/);
+  assert.throws(() => normalizeProfileHandle('@a'), /2-18/);
+  assert.throws(() => normalizeProfileHandle('@name with spaces'), /2-18/);
+  assert.throws(() => normalizeProfileHandle(`@${'a'.repeat(19)}`), /2-18/);
+});
+
+test('onboarding maps embedded sport and skill relations in either PostgREST shape', () => {
+  const mapped = mapProfileSports([
+    { sports: [{ name: 'Football' }], skill_levels: [{ name: 'Seasoned' }] },
+    { sports: { name: 'Chess' }, skill_levels: { name: 'Beginner' } }
+  ]);
+  assert.deepEqual(mapped, {
+    selected: ['Football', 'Chess'],
+    skills: { Football: 'Seasoned', Chess: 'Beginner' }
+  });
+});
+
+test('chat merge deduplicates realtime echoes, orders messages, and retains only newest 200', () => {
+  const message = (id, createdAt) => ({
+    id, eventId: 'event-1', senderId: 'user-1', sender: 'A', text: id,
+    time: '', createdAt, mine: true
+  });
+  const merged = mergeChatMessage(
+    [message('later', '2026-11-07T10:02:00Z'), message('same', '2026-11-07T10:01:00Z')],
+    message('same', '2026-11-07T10:01:00Z')
+  );
+  assert.deepEqual(merged.map(({ id }) => id), ['same', 'later']);
+  assert.equal(merged.filter(({ id }) => id === 'same').length, 1);
+  const capped = mergeChatMessage(
+    Array.from({ length: 200 }, (_, index) => message(String(index), new Date(index * 1000).toISOString())),
+    message('new', new Date(200 * 1000).toISOString())
+  );
+  assert.equal(capped.length, 200);
+  assert.equal(capped[0].id, '1');
+  assert.equal(capped.at(-1).id, 'new');
+});
+
+test('global button text follows its declared foreground color', async () => {
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /:global\(button\)\{?-webkit-text-fill-color:currentColor/);
+  assert.doesNotMatch(page, /:global\(button\)\{?-webkit-text-fill-color:#171717/);
+});
+
+test('forward esports RPC requires skill, validates caller inputs, and keeps team size optional', async () => {
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261107090000_fix_esports_creation_and_signup_metadata.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(migration, /p_skill_level_code text,\s*p_team_size integer default null/i);
+  assert.match(migration, /team_size, skill_level_code/i);
+  assert.match(migration, /p_capacity is null or p_capacity < 2 or p_capacity > 1000/i);
+  assert.match(migration, /where id = p_game_id and enabled/i);
+  assert.match(migration, /where code = p_skill_level_code/i);
+  assert.match(migration, /where id = auth\.uid\(\)/i);
+  assert.match(migration, /security invoker/i);
+});

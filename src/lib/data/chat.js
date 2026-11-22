@@ -1,13 +1,7 @@
 import { supabase } from '$lib/supabase/client.js';
+import { formatChatTime, mergeChatMessage } from './chat-message-utils.js';
 
 /** @typedef {{ id: string, eventId: string, senderId: string, sender: string, text: string, time: string, createdAt: string, mine: boolean }} HuddlChatMessage */
-
-/** @param {string} value */
-function formatTime(value) {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return '';
-  return date.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
-}
 
 /** @param {Record<string, unknown>} row @param {Record<string, string>} names @param {string} userId @returns {HuddlChatMessage} */
 function shapeMessage(row, names, userId) {
@@ -19,11 +13,13 @@ function shapeMessage(row, names, userId) {
     senderId,
     sender: names[senderId] ?? (senderId === userId ? 'You' : 'Player'),
     text: String(row.body ?? ''),
-    time: formatTime(createdAt),
+    time: formatChatTime(createdAt),
     createdAt,
     mine: senderId === userId
   };
 }
+
+export { mergeChatMessage };
 
 /** @param {string} eventId @param {string} userId @returns {Promise<HuddlChatMessage[]>} */
 export async function loadEventMessages(eventId, userId) {
