@@ -1178,7 +1178,7 @@
     try {
       const decision = await decideEventJoinRequest(selectedEvent.pendingRequestId, true);
       await refreshEvents();
-      showNotice(decision === 'full' ? 'Event is full); request was declined' : 'Request accepted';
+      showNotice(decision === 'full' ? 'Event is full; request was declined' : 'Request accepted');
     } catch (acceptError) {
       showNotice(userFacingError(acceptError, 'Could not accept the request.'));
     } finally {
