@@ -84,6 +84,13 @@ test('event completion is blocked before start and confirmed independently of ra
   assert.ok(page.includes('await Promise.all([refreshEvents(), refreshStats()])'));
 });
 
+
+test('join-request result notice preserves the full event-full message', async () => {
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.ok(page.includes("showNotice(decision === 'full' ? 'Event is full; request was declined' : 'Request accepted');"));
+  assert.ok(!page.includes("showNotice(decision === 'full' ? 'Event is full);"));
+});
+
 test('forward esports RPC requires skill, validates caller inputs, and keeps team size optional', async () => {
   const migration = await readFile(
     new URL('../supabase/migrations/20261107090000_fix_esports_creation_and_signup_metadata.sql', import.meta.url),
