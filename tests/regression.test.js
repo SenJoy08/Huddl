@@ -66,6 +66,24 @@ test('validation toasts render above modal sheets and scrims', async () => {
   assert.ok(page.includes('.toast{position:fixed;z-index:10002;'));
 });
 
+
+test('notices bounce in and dismiss after one second', async () => {
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /function showNotice\(message\)[\s\S]*?\}, 1000\);/);
+  assert.ok(page.includes('in:fly={{ y: 24, duration: 360, opacity: 0, easing: backOut }}'));
+  assert.ok(page.includes('out:fly={{ y: 28, duration: 220, opacity: 0, easing: cubicIn }}'));
+  assert.ok(page.includes('clearTimeout(noticeTimer)'));
+});
+
+test('event completion is blocked before start and confirmed independently of ratings', async () => {
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.ok(page.includes('eventStartTimestamp(selectedEvent) > Date.now()} onclick={finishSelectedEvent}'));
+  assert.ok(page.includes('eventStartTimestamp(eventToFinish) > Date.now()'));
+  assert.ok(page.includes("You can finish this event after its scheduled start time."));
+  assert.ok(page.includes("if (result !== 'completed') throw new Error('The event was not marked as completed.')"));
+  assert.ok(page.includes('await Promise.all([refreshEvents(), refreshStats()])'));
+});
+
 test('forward esports RPC requires skill, validates caller inputs, and keeps team size optional', async () => {
   const migration = await readFile(
     new URL('../supabase/migrations/20261107090000_fix_esports_creation_and_signup_metadata.sql', import.meta.url),
