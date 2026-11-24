@@ -2011,7 +2011,7 @@
             {#if !selectedEvent.ratingsSubmitted}<button class="primary" onclick={openSelectedEventRating}>Rate players</button>{/if}
           {:else if selectedEvent.status === 'upcoming' || selectedEvent.status === 'full'}
             {#if eventStartTimestamp(selectedEvent) > Date.now()}<button class="secondary" disabled={Boolean(eventAction)} onclick={() => startEdit(selectedEvent)}><Icon name="edit" size={17}/>Edit event</button>{/if}
-            <button class="secondary" disabled={Boolean(eventAction)} onclick={finishSelectedEvent}><Icon name="check" size={17}/>{eventAction === 'finish' ? 'Finishing…' : 'Finish event'}</button>
+            <button class="secondary" disabled={Boolean(eventAction) || eventStartTimestamp(selectedEvent) > Date.now()} onclick={finishSelectedEvent}><Icon name="check" size={17}/>{eventAction === 'finish' ? 'Finishing…' : eventStartTimestamp(selectedEvent) > Date.now() ? 'Available at start time' : 'Finish event'}</button>
             <button class="danger" disabled={Boolean(eventAction)} onclick={cancelSelectedEvent}><Icon name="close" size={17}/>{eventAction === 'cancel' ? 'Cancelling…' : 'Cancel event'}</button>
           {/if}
           {#if (selectedEvent.pendingRequests ?? 0) > 0}
