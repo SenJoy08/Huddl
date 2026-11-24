@@ -48,6 +48,7 @@
   import { subscribeToHuddlRealtime, subscribeToEventMessages } from '$lib/data/realtime.js';
   import { supabase } from '$lib/supabase/client.js';
   import { onDestroy, onMount } from 'svelte';
+  import { backOut, cubicIn } from 'svelte/easing';
   import { fade, fly, scale, slide } from 'svelte/transition';
   import { goto } from '$app/navigation';
 
@@ -64,6 +65,8 @@
     if (normalized.includes('not authenticated') || normalized.includes('jwt') || normalized.includes('session')) return 'Your session has expired. Please log in again.';
     if (normalized.includes('duplicate') || normalized.includes('already exists') || normalized.includes('unique constraint')) return 'That already exists. Try a different value.';
     if (normalized.includes('permission') || normalized.includes('not allowed') || normalized.includes('forbidden')) return 'You do not have permission to do that.';
+    if (normalized.includes('cannot be completed before its start time')) return 'You can finish this event after its scheduled start time.';
+    if (normalized.includes('only the event host can complete this event')) return 'Only the event host can finish this event.';
     if (normalized.includes('no longer joinable') || normalized.includes('event is full')) return 'This game is no longer available to join.';
     return fallback;
   }
@@ -132,6 +135,18 @@
   let ratingEvent = null;
   let search = '';
   let notice = '';
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let noticeTimer = null;
+
+  /** @param {string} message */
+  function showNotice(message) {
+    if (noticeTimer !== null) clearTimeout(noticeTimer);
+    notice = message;
+    noticeTimer = setTimeout(() => {
+      notice = '';
+      noticeTimer = null;
+    }, 1000);
+  }
   /** @type {{ value: string, label: string }[]} */
   let dateOptions = [];
   /** @type {EventForm} */
@@ -332,7 +347,7 @@
       visibilityCleanup = cleanupVisibilityListeners;
     } catch (loadError) {
       console.error('Failed to load Huddl:', loadError);
-      notice = loadError instanceof Error ? loadError.message : 'Could not load Huddl data';
+      showNotice(loadError instanceof Error ? loadError.message : 'Could not load Huddl data');
     }
 
     if (!dateOptions.length) dateOptions = buildDateOptions();
@@ -906,8 +921,7 @@
     eventAction = 'logout';
     const { error } = await signOut();
     if (error) {
-      notice = userFacingError(error, 'Could not save that change.');
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(userFacingError(error, 'Could not save that change.'));
       eventAction = '';
       return;
     }
@@ -953,35 +967,34 @@
   async function joinSelectedEvent() {
     if (eventAction || !selectedEvent || selectedEvent.status === 'cancelled' || selectedEvent.status === 'completed') return;
     if (eventStartTimestamp(selectedEvent) <= Date.now()) {
-      notice = 'This event has already started';
+      showNotice('This event has already started');
       return;
     }
     if (selectedEvent.members >= selectedEvent.capacity) {
-      notice = 'This game is full';
+      showNotice('This game is full');
       return;
     }
     eventAction = 'join';
     try {
       if (selectedEvent.visibility === 'Private') {
         const result = await requestPrivateEvent(selectedEvent.id);
-        notice = result === 'full'
+        showNotice(result === 'full'
           ? 'This game is full'
           : result === 'already_member'
             ? 'You are already in this game'
             : result === 'already_pending'
               ? 'Your join request is already pending'
-              : 'Join request sent';
+              : 'Join request sent');
       } else {
         const result = await joinPublicEvent(selectedEvent.id);
-        notice = result === 'full' ? 'This game is full' : result === 'already_member' ? 'You are already in this game' : 'You joined the game';
+        showNotice(result === 'full' ? 'This game is full' : result === 'already_member' ? 'You are already in this game' : 'You joined the game');
       }
       await refreshEvents();
     } catch (joinError) {
-      notice = userFacingError(joinError, 'Could not join this game.');
+      showNotice(userFacingError(joinError, 'Could not join this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function leaveSelectedEvent() {
@@ -989,14 +1002,13 @@
     eventAction = 'leave';
     try {
       const result = await leaveEvent(selectedEvent.id);
-      notice = result === 'not_member' ? 'You are not in this game' : 'You left the game';
+      showNotice(result === 'not_member' ? 'You are not in this game' : 'You left the game');
       await refreshEvents();
     } catch (leaveError) {
-      notice = userFacingError(leaveError, 'Could not leave this game.');
+      showNotice(userFacingError(leaveError, 'Could not leave this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   function startCreate() {
@@ -1015,19 +1027,19 @@
   async function create() {
     if (creatingEvent) return;
     if (!newEvent.title.trim() || !newEvent.dateValue || !newEvent.time || !newEvent.location.trim()) {
-      notice = 'Add a title, date, time, and location';
+      showNotice('Add a title, date, time, and location');
       return;
     }
     if (!Number.isInteger(Number(newEvent.capacity)) || Number(newEvent.capacity) < 2) {
-      notice = 'Capacity must be a whole number of at least 2';
+      showNotice('Capacity must be a whole number of at least 2');
       return;
     }
     if (!isFutureLocalDateTime(newEvent.dateValue, newEvent.time)) {
-      notice = 'Choose a date and time in the future';
+      showNotice('Choose a date and time in the future');
       return;
     }
     if (newEvent.eventType === 'esports' && !newEvent.gameId) {
-      notice = 'Choose an esports game';
+      showNotice('Choose an esports game');
       return;
     }
 
@@ -1046,13 +1058,12 @@
       eventAvailabilityFilter = 'all';
       eventSkillFilter = 'all';
       await refreshEvents();
-      notice = 'Event created';
+      showNotice('Event created');
     } catch (createError) {
-      notice = userFacingError(createError, 'Could not create this game.');
+      showNotice(userFacingError(createError, 'Could not create this game.'));
     } finally {
       creatingEvent = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {MockEvent | null} event */
@@ -1088,15 +1099,15 @@
   async function saveEdit() {
     if (eventSaving) return;
     if (!selectedEvent || !editEvent.title.trim() || !editEvent.dateValue || !editEvent.time || !editEvent.location.trim()) {
-      notice = 'Add a title, date, time, and location';
+      showNotice('Add a title, date, time, and location');
       return;
     }
     if (!Number.isInteger(Number(editEvent.capacity)) || Number(editEvent.capacity) < 2) {
-      notice = 'Capacity must be a whole number of at least 2';
+      showNotice('Capacity must be a whole number of at least 2');
       return;
     }
     if (!isFutureLocalDateTime(editEvent.dateValue, editEvent.time)) {
-      notice = 'Choose a date and time in the future';
+      showNotice('Choose a date and time in the future');
       return;
     }
     editEvent = { ...editEvent, capacity: Math.max(Number(editEvent.capacity), selectedEvent.members) };
@@ -1106,13 +1117,12 @@
       else await updateSportEvent(selectedEvent.id, editEvent);
       await refreshEvents();
       showEdit = false;
-      notice = 'Event updated';
+      showNotice('Event updated');
     } catch (updateError) {
-      notice = userFacingError(updateError, 'Could not update this game.');
+      showNotice(userFacingError(updateError, 'Could not update this game.'));
     } finally {
       eventSaving = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function cancelSelectedEvent() {
@@ -1122,34 +1132,44 @@
       await setEventStatus(selectedEvent.id, 'cancelled');
       await refreshEvents();
       hasSelectedEvent = false;
-      notice = 'Event cancelled';
+      showNotice('Event cancelled');
     } catch (cancelError) {
-      notice = userFacingError(cancelError, 'Could not cancel this game.');
+      showNotice(userFacingError(cancelError, 'Could not cancel this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function finishSelectedEvent() {
-    if (eventAction || !selectedEvent || !isEventHostById(selectedEvent.hostId ?? '')) return;
+    const eventToFinish = selectedEvent;
+    if (eventAction || !eventToFinish || !isEventHostById(eventToFinish.hostId ?? '')) return;
+
+    // The completion RPC rejects events that have not reached their scheduled start.
+    if (eventStartTimestamp(eventToFinish) > Date.now()) {
+      showNotice('You can finish this event after its scheduled start time.');
+      return;
+    }
+
     eventAction = 'finish';
-    const eventBeforeFinish = selectedEvent;
     try {
-      await setEventStatus(selectedEvent.id, 'completed');
-      await refreshEvents();
-      await refreshStats();
+      const result = await setEventStatus(eventToFinish.id, 'completed');
+      if (result !== 'completed') throw new Error('The event was not marked as completed.');
+
+      const completedEvent = { ...eventToFinish, status: 'completed', ratingsSubmitted: false };
+      await Promise.all([refreshEvents(), refreshStats()]);
       hasSelectedEvent = false;
-      const completedEvent = { ...eventBeforeFinish, status: 'completed', ratingsSubmitted: false };
+
+      // The event is complete even when there are no other players to rate or
+      // the rating sheet cannot load. Do not turn a successful completion into
+      // a failed finish action because of a separate rating UI issue.
       const ratingOpened = await openRating(completedEvent);
-      if (!ratingOpened) return;
-      notice = 'Event marked complete';
+      if (ratingOpened) showNotice('Event marked complete');
+      else if (!showRating && !notice) showNotice('Event marked complete');
     } catch (finishError) {
-      notice = userFacingError(finishError, 'Could not finish this game.');
+      showNotice(userFacingError(finishError, 'Could not finish this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function acceptRequest() {
@@ -1158,13 +1178,12 @@
     try {
       const decision = await decideEventJoinRequest(selectedEvent.pendingRequestId, true);
       await refreshEvents();
-      notice = decision === 'full' ? 'Event is full; request was declined' : 'Request accepted';
+      showNotice(decision === 'full' ? 'Event is full); request was declined' : 'Request accepted';
     } catch (acceptError) {
-      notice = userFacingError(acceptError, 'Could not accept the request.');
+      showNotice(userFacingError(acceptError, 'Could not accept the request.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function rejectRequest() {
@@ -1173,13 +1192,12 @@
     try {
       await decideEventJoinRequest(selectedEvent.pendingRequestId, false);
       await refreshEvents();
-      notice = 'Request declined';
+      showNotice('Request declined');
     } catch (rejectError) {
-      notice = userFacingError(rejectError, 'Could not decline the request.');
+      showNotice(userFacingError(rejectError, 'Could not decline the request.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function openPendingRequestProfile() {
@@ -1198,8 +1216,7 @@
 
       await openPlayerProfile(data.user_id);
     } catch (requestError) {
-      notice = userFacingError(requestError, 'Could not open the requester profile.');
-      setTimeout(() => (notice = ''), 2200);
+      showNotice(userFacingError(requestError, 'Could not open the requester profile.'));
     }
   }
 
@@ -1230,8 +1247,7 @@
         }
         showRating = false;
         ratingEvent = null;
-        notice = isHost ? 'Ratings complete' : 'There are no other players to rate';
-        setTimeout(() => (notice = ''), 1800);
+        showNotice(isHost ? 'Ratings complete' : 'There are no other players to rate');
         return false;
       }
 
@@ -1252,8 +1268,7 @@
     } catch (ratingError) {
       if (loadVersion !== ratingSessionVersion || ratingEvent?.id !== event.id) return false;
       ratingLoadError = userFacingError(ratingError, 'Could not load players to rate right now.');
-      notice = ratingLoadError;
-      setTimeout(() => (notice = ''), 2200);
+      showNotice(ratingLoadError);
     } finally {
       if (loadVersion === ratingSessionVersion) ratingLoading = false;
     }
@@ -1362,7 +1377,7 @@
       if (loadVersion === chatSessionVersion) {
         console.error('Failed to load chat:', messageError);
         chatLoadError = userFacingError(messageError, 'Could not load this chat right now.');
-        notice = chatLoadError;
+        showNotice(chatLoadError);
       }
     } finally {
       if (loadVersion === chatSessionVersion) chatLoading = false;
@@ -1460,15 +1475,13 @@
     }));
 
     if (!players.length) {
-      notice = 'There are no other players to rate';
-      setTimeout(() => (notice = ''), 1800);
+      showNotice('There are no other players to rate');
       return;
     }
 
     const missingRatings = players.filter((item) => item.draft.showedUp && item.draft.stars < 1).length;
     if (missingRatings > 0) {
-      notice = `Rate the ${missingRatings} player${missingRatings === 1 ? '' : 's'} who showed up`;
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(`Rate the ${missingRatings} player${missingRatings === 1 ? '' : 's'} who showed up`);
       return;
     }
 
@@ -1499,15 +1512,14 @@
       ratingPlayers = [];
       ratingDrafts = {};
       await refreshStats();
-      notice = wasHostRating ? 'Ratings submitted' : 'Player ratings submitted';
+      showNotice(wasHostRating ? 'Ratings submitted' : 'Player ratings submitted');
     } catch (ratingError) {
-      notice = userFacingError(ratingError, 'Could not submit ratings.');
+      showNotice(userFacingError(ratingError, 'Could not submit ratings.'));
     } finally {
       ratingLoading = false;
       ratingSubmitting = false;
     }
 
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function refreshNotifications() {
@@ -1561,8 +1573,7 @@
     } catch (notificationError) {
       console.error('Failed to mark notification read:', notificationError);
       notifications = previous;
-      notice = userFacingError(notificationError, 'Could not update the notification.');
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(userFacingError(notificationError, 'Could not update the notification.'));
     }
   }
 
@@ -1575,12 +1586,15 @@
     } catch (notificationError) {
       console.error('Failed to mark all notifications read:', notificationError);
       notifications = previous;
-      notice = userFacingError(notificationError, 'Could not update notifications.');
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(userFacingError(notificationError, 'Could not update notifications.'));
     }
   }
 
   onDestroy(() => {
+    if (noticeTimer !== null) {
+      clearTimeout(noticeTimer);
+      noticeTimer = null;
+    }
     chatSessionVersion += 1;
     playerProfileLoadVersion += 1;
     ratingSessionVersion += 1;
@@ -1614,16 +1628,15 @@
       result = await sendFriendRequestToDb(candidate.id);
     } catch (requestError) {
       console.error('Send friend request failed:', requestError);
-      notice = userFacingError(requestError, 'Could not send the friend request.');
+      showNotice(userFacingError(requestError, 'Could not send the friend request.'));
       friendAction = '';
-      setTimeout(() => (notice = ''), 2200);
       return;
     }
-    if (result === 'incoming_pending') notice = `${candidate.name} already sent you a request`;
-    else if (result === 'already_friend') notice = `You are already friends with ${candidate.name}`;
-    else if (result === 'already_pending') notice = `Request already sent to ${candidate.name}`;
-    else if (result === 'sent') notice = `Request sent to ${candidate.name}`;
-    else notice = `Request status: ${result}`;
+    if (result === 'incoming_pending') showNotice(`${candidate.name} already sent you a request`);
+    else if (result === 'already_friend') showNotice(`You are already friends with ${candidate.name}`);
+    else if (result === 'already_pending') showNotice(`Request already sent to ${candidate.name}`);
+    else if (result === 'sent') showNotice(`Request sent to ${candidate.name}`);
+    else showNotice(`Request status: ${result}`);
     if (session) {
       try {
         await refreshFriends(session.id);
@@ -1632,7 +1645,6 @@
       }
     }
     friendAction = '';
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {FriendCandidate} candidate */
@@ -1658,13 +1670,12 @@
     try {
       await respondFriendRequest(request.id, true);
       if (session) await refreshFriends(session.id);
-      notice = `${request.name} is now your friend`;
+      showNotice(`${request.name} is now your friend`);
     } catch (requestError) {
-      notice = userFacingError(requestError, 'Could not accept the friend request.');
+      showNotice(userFacingError(requestError, 'Could not accept the friend request.'));
     } finally {
       friendAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {IncomingFriendRequest} request */
@@ -1675,13 +1686,12 @@
     try {
       await respondFriendRequest(request.id, false);
       if (session) await refreshFriends(session.id);
-      notice = 'Request declined';
+      showNotice('Request declined');
     } catch (requestError) {
-      notice = userFacingError(requestError, 'Could not decline the friend request.');
+      showNotice(userFacingError(requestError, 'Could not decline the friend request.'));
     } finally {
       friendAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {MockFriend} friend */
@@ -1694,13 +1704,12 @@
       if (session) await refreshFriends(session.id);
       selectedPlayerProfile = null;
       playerProfileLoading = false;
-      notice = `${friend.name} removed from friends`;
+      showNotice(`${friend.name} removed from friends`);
     } catch (removeError) {
-      notice = userFacingError(removeError, 'Could not remove this friend.');
+      showNotice(userFacingError(removeError, 'Could not remove this friend.'));
     } finally {
       friendAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {string} id */
@@ -1773,8 +1782,7 @@
     } catch (profileError) {
       if (loadVersion !== playerProfileLoadVersion || selectedPlayerProfile?.id !== playerId) return;
       profileLoadError = userFacingError(profileError, 'Could not load this player profile right now.');
-      notice = profileLoadError;
-      setTimeout(() => (notice = ''), 2200);
+      showNotice(profileLoadError);
     } finally {
       if (loadVersion === playerProfileLoadVersion) playerProfileLoading = false;
     }
@@ -1814,7 +1822,7 @@
       userProfile = { ...userProfile, name, handle, bio };
       session = { ...session, name };
       profileSheet = null;
-      notice = 'Profile updated';
+      showNotice('Profile updated');
     } catch (saveError) {
       profileEditorError = userFacingError(saveError, 'Could not save your profile. Please try again.');
     } finally {
@@ -1861,7 +1869,7 @@
         skills: sportsDraft.map((sport) => skillsDraft[sport] ?? 'Intermediate')
       };
       profileSheet = null;
-      notice = 'Sports updated';
+      showNotice('Sports updated');
     } catch (saveError) {
       sportsEditorError = userFacingError(saveError, 'Could not save your sports and skill levels. Please try again.');
     } finally {
@@ -1901,13 +1909,12 @@
 
       userProfile = { ...userProfile, settings: { ...settingsDraft } };
       profileSheet = null;
-      notice = 'Settings saved';
+      showNotice('Settings saved');
     } catch (saveError) {
-      notice = userFacingError(saveError, 'Could not save your settings.');
+      showNotice(userFacingError(saveError, 'Could not save your settings.'));
     } finally {
       settingsSaving = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   function openPasswordSheet() {
@@ -1929,14 +1936,12 @@
     const confirmPassword = passwordDraft.confirmPassword;
 
     if (password.length < 6) {
-      notice = 'Password must be at least 6 characters';
-      setTimeout(() => (notice = ''), 2200);
+      showNotice('Password must be at least 6 characters');
       return;
     }
 
     if (password !== confirmPassword) {
-      notice = 'Passwords do not match';
-      setTimeout(() => (notice = ''), 2200);
+      showNotice('Passwords do not match');
       return;
     }
 
@@ -1946,13 +1951,12 @@
       if (error) throw error;
       passwordSheetOpen = false;
       passwordDraft = { password: '', confirmPassword: '' };
-      notice = 'Password updated';
+      showNotice('Password updated');
     } catch (passwordError) {
-      notice = userFacingError(passwordError, 'Could not update your password.');
+      showNotice(userFacingError(passwordError, 'Could not update your password.'));
     } finally {
       passwordSaving = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function saveAccountSettings() {
@@ -1967,13 +1971,12 @@
       if (error) throw error;
 
       profileSheet = null;
-      notice = 'Account saved';
+      showNotice('Account saved');
     } catch (saveError) {
-      notice = userFacingError(saveError, 'Could not save that change.');
+      showNotice(userFacingError(saveError, 'Could not save that change.'));
     } finally {
       accountSaving = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
 </script>
@@ -2716,7 +2719,7 @@
     </div>
   {/if}
   <footer class="site-footer">built and maintained by Sanjay Shashibushan</footer>
-  {#if notice}<div class="toast" transition:fly={{ y: 10, duration: 150, opacity: 0 }}>{notice}</div>{/if}
+  {#if notice}<div class="toast" in:fly={{ y: 24, duration: 360, opacity: 0, easing: backOut }} out:fly={{ y: 28, duration: 220, opacity: 0, easing: cubicIn }}>{notice}</div>{/if}
 </div>
 {/if}
 
