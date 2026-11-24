@@ -4,7 +4,7 @@ import { supabase } from '$lib/supabase/client.js';
 /** @typedef {{ id: string, event_id: string, user_id: string, status: string }} EventRequestRow */
 /** @typedef {{ id: string, display_name: string|null, handle: string|null }} ProfileRow */
 
-/** @typedef {{ id: string, eventType: 'sport' | 'esports', sport: string, gameId?: string, title: string, date: string, dateValue: string, time: string, location: string, host: string, hostId: string, members: number, capacity: number, skill: string, color: string, description: string, visibility: string, status: string, pendingRequests: number, pendingRequestId?: string|null, isMember: boolean, ratingsSubmitted?: boolean, platform?: string|null, gameMode?: string|null, memberProfiles?: { id:string,name:string,handle:string,color:string }[] }} HuddlEvent */
+/** @typedef {{ id: string, eventType: 'sport' | 'esports', sport: string, gameId?: string, title: string, date: string, dateValue: string, time: string, location: string, host: string, hostId: string, members: number, capacity: number, skill: string, color: string, description: string, visibility: string, status: string, pendingRequests: number, pendingRequestId?: string|null, hasRequested: boolean, isMember: boolean, ratingsSubmitted?: boolean, platform?: string|null, gameMode?: string|null, memberProfiles?: { id:string,name:string,handle:string,color:string }[] }} HuddlEvent */
 
 /** @type {Record<string, string>} */
 const COLOR_BY_SPORT = {
@@ -111,6 +111,7 @@ async function hydrateEvents(eventRows, userId) {
       status: row.status,
       pendingRequests: 0,
       pendingRequestId: null,
+      hasRequested: false,
       isMember: row.host_id === userId,
       ratingsSubmitted: Boolean(row.host_rated_at),
       platform: null,
@@ -207,6 +208,7 @@ async function hydrateEvents(eventRows, userId) {
       description: row.description ?? 'A new Huddl event.',
       visibility: row.visibility === 'private' ? 'Private' : 'Public',
       status: row.status,
+      hasRequested: pendingRequests.some(/** @param {EventRequestRow} request */ (request) => request.user_id === userId),
       pendingRequests: pendingRequests.filter(/** @param {EventRequestRow} request */ (request) => request.user_id !== userId).length,
       pendingRequestId: pendingRequests.find(/** @param {EventRequestRow} request */ (request) => request.user_id !== userId)?.id ?? null,
       isMember: row.host_id === userId || members.some(/** @param {EventMemberRow} member */ (member) => member.user_id === userId),
