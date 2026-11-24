@@ -50,6 +50,22 @@ test('global button text follows its declared foreground color', async () => {
   assert.doesNotMatch(page, /:global\(button\)\{?-webkit-text-fill-color:#171717/);
 });
 
+test('private join requests show a disabled Requested state for the requester', async () => {
+  const events = await readFile(new URL('../src/lib/data/events.js', import.meta.url), 'utf8');
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.ok(events.includes('hasRequested: pendingRequests.some('));
+  assert.ok(events.includes('(request) => request.user_id === userId)'));
+  assert.ok(page.includes("selectedEvent.visibility === 'Private' && selectedEvent.hasRequested"));
+  assert.ok(page.includes('class="primary request-pending-button" disabled>Requested</button>'));
+  assert.ok(page.includes('.primary.request-pending-button{background:#e6e6e6'));
+});
+
+test('validation toasts render above modal sheets and scrims', async () => {
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.ok(page.includes('.scrim{position:fixed;inset:0;background:rgba(0,0,0,.38);z-index:10000;'));
+  assert.ok(page.includes('.toast{position:fixed;z-index:10002;'));
+});
+
 test('forward esports RPC requires skill, validates caller inputs, and keeps team size optional', async () => {
   const migration = await readFile(
     new URL('../supabase/migrations/20261107090000_fix_esports_creation_and_signup_metadata.sql', import.meta.url),
