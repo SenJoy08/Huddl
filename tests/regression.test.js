@@ -104,3 +104,12 @@ test('forward esports RPC requires skill, validates caller inputs, and keeps tea
   assert.match(migration, /where id = auth\.uid\(\)/i);
   assert.match(migration, /security invoker/i);
 });
+
+
+test('shared layout applies border-box sizing to every route', async () => {
+  const layout = await readFile(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
+  assert.match(
+    layout,
+    /:global\(\*\),\s*:global\(\*::before\),\s*:global\(\*::after\)\s*\{\s*box-sizing:\s*border-box;/
+  );
+});
