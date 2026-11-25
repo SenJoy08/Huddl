@@ -1621,7 +1621,7 @@
   /** @param {FriendCandidate} candidate */
   async function sendFriendRequest(candidate) {
     const key = `send:${candidate.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     let result;
     try {
@@ -1665,7 +1665,7 @@
   /** @param {IncomingFriendRequest} request */
   async function acceptFriendRequest(request) {
     const key = `accept:${request.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     try {
       await respondFriendRequest(request.id, true);
@@ -1681,7 +1681,7 @@
   /** @param {IncomingFriendRequest} request */
   async function declineFriendRequest(request) {
     const key = `decline:${request.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     try {
       await respondFriendRequest(request.id, false);
@@ -1697,7 +1697,7 @@
   /** @param {MockFriend} friend */
   async function removeFriend(friend) {
     const key = `remove:${friend.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     try {
       await removeFriendFromDb(friend.id);
@@ -2167,10 +2167,10 @@
         </div>
       {/if}
       {#if filteredIncomingRequests.length > 0}
-        <section class="panel compact-panel"><div class="panel-head"><h2>Friend requests</h2><span class="request-count">{filteredIncomingRequests.length} waiting</span></div>{#each filteredIncomingRequests as request}<div class="request-row"><button type="button" class="request-person" onclick={() => openPlayerProfile(request.senderId, request)}><span class="friend-avatar {avatarColorForId(request.senderId)}">{(request.name?.[0] ?? request.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{request.name}</strong><small>{request.handle} · {request.sports}</small></span></button><button class="request-action accept" disabled={friendAction === `accept:${request.id}`} onclick={() => acceptFriendRequest(request)}>{friendAction === `accept:${request.id}` ? 'Accepting…' : 'Accept'}</button><button class="request-action decline" disabled={friendAction === `decline:${request.id}`} onclick={() => declineFriendRequest(request)}>{friendAction === `decline:${request.id}` ? 'Declining…' : 'Decline'}</button></div>{/each}</section>
+        <section class="panel compact-panel"><div class="panel-head"><h2>Friend requests</h2><span class="request-count">{filteredIncomingRequests.length} waiting</span></div>{#each filteredIncomingRequests as request}<div class="request-row"><button type="button" class="request-person" onclick={() => openPlayerProfile(request.senderId, request)}><span class="friend-avatar {avatarColorForId(request.senderId)}">{(request.name?.[0] ?? request.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{request.name}</strong><small>{request.handle} · {request.sports}</small></span></button><button class="request-action accept" disabled={Boolean(friendAction)} onclick={() => acceptFriendRequest(request)}>{friendAction === `accept:${request.id}` ? 'Accepting…' : 'Accept'}</button><button class="request-action decline" disabled={Boolean(friendAction)} onclick={() => declineFriendRequest(request)}>{friendAction === `decline:${request.id}` ? 'Declining…' : 'Decline'}</button></div>{/each}</section>
       {/if}
-      <section class="friends-section"><div class="section-head"><h2>{searchQuery ? 'Search results' : 'Find people'}</h2><span>{displayedPeople.length} results</span></div><div class="list">{#each displayedPeople as candidate}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(candidate.id, candidate)}><span class="friend-avatar {avatarColorForId(candidate.id)}">{(candidate.name?.[0] ?? candidate.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{candidate.name}</strong><small>{candidate.handle} · {candidate.sports}</small></span></button>{#if searchQuery}{#if candidate.relation === 'none'}<button class="tiny" disabled={friendAction === `send:${candidate.id}`} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{:else if candidate.relation === 'outgoing'}<button class="tiny" disabled>Pending</button>{:else if candidate.relation === 'incoming' && candidate.requestId}<button class="tiny" disabled={friendAction === `accept:${candidate.requestId}`} onclick={() => acceptSearchResult(candidate)}>{friendAction === `accept:${candidate.requestId}` ? 'Accepting…' : 'Accept'}</button>{:else}<button class="tiny" disabled>Friends</button>{/if}{:else}<button class="tiny" disabled={friendAction === `send:${candidate.id}`} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{/if}</div>{/each}</div></section>
-      <section class="friends-section"><div class="section-head"><h2>Your friends</h2><span>{filteredFriends.length} friends</span></div><div class="list">{#each filteredFriends as friend}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(friend.id, friend)}><span class="friend-avatar {avatarColorForId(friend.id)}">{(friend.name?.[0] ?? friend.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{friend.name}</strong><small>{friend.handle} · {friend.sports}</small></span><span class="status">{friend.status}</span></button><button class="tiny" disabled={friendAction === `remove:${friend.id}`} onclick={() => removeFriend(friend)}>{friendAction === `remove:${friend.id}` ? 'Removing…' : 'Remove'}</button></div>{/each}</div></section>
+      <section class="friends-section"><div class="section-head"><h2>{searchQuery ? 'Search results' : 'Find people'}</h2><span>{displayedPeople.length} results</span></div><div class="list">{#each displayedPeople as candidate}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(candidate.id, candidate)}><span class="friend-avatar {avatarColorForId(candidate.id)}">{(candidate.name?.[0] ?? candidate.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{candidate.name}</strong><small>{candidate.handle} · {candidate.sports}</small></span></button>{#if searchQuery}{#if candidate.relation === 'none'}<button class="tiny" disabled={Boolean(friendAction)} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{:else if candidate.relation === 'outgoing'}<button class="tiny" disabled>Pending</button>{:else if candidate.relation === 'incoming' && candidate.requestId}<button class="tiny" disabled={Boolean(friendAction)} onclick={() => acceptSearchResult(candidate)}>{friendAction === `accept:${candidate.requestId}` ? 'Accepting…' : 'Accept'}</button>{:else}<button class="tiny" disabled>Friends</button>{/if}{:else}<button class="tiny" disabled={Boolean(friendAction)} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{/if}</div>{/each}</div></section>
+      <section class="friends-section"><div class="section-head"><h2>Your friends</h2><span>{filteredFriends.length} friends</span></div><div class="list">{#each filteredFriends as friend}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(friend.id, friend)}><span class="friend-avatar {avatarColorForId(friend.id)}">{(friend.name?.[0] ?? friend.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{friend.name}</strong><small>{friend.handle} · {friend.sports}</small></span><span class="status">{friend.status}</span></button><button class="tiny" disabled={Boolean(friendAction)} onclick={() => removeFriend(friend)}>{friendAction === `remove:${friend.id}` ? 'Removing…' : 'Remove'}</button></div>{/each}</div></section>
     </main>
   {:else if active === 'stats'}
     <main class="screen" transition:fade={{ duration: 170 }}>
