@@ -113,3 +113,9 @@ test('shared layout applies border-box sizing to every route', async () => {
     /:global\(\*\),\s*:global\(\*::before\),\s*:global\(\*::after\)\s*\{\s*box-sizing:\s*border-box;/
   );
 });
+
+
+test('shared layout uses mobile-safe input sizing across all routes', async () => {
+  const layout = await readFile(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
+  assert.match(layout, /:global\(input\),\s*:global\(textarea\),\s*:global\(select\)\s*\{\s*font-size:\s*16px !important;/);
+});
