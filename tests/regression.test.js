@@ -119,3 +119,19 @@ test('shared layout uses mobile-safe input sizing across all routes', async () =
   const layout = await readFile(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
   assert.match(layout, /:global\(input\),\s*:global\(textarea\),\s*:global\(select\)\s*\{\s*font-size:\s*16px !important;/);
 });
+
+
+test('friend mutations serialize actions and disable all competing friend controls', async () => {
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.equal((page.match(/if \(friendAction\) return;/g) ?? []).length, 4);
+  assert.doesNotMatch(page, /if \(friendAction === key\) return;/);
+  for (const expression of [
+    'disabled={Boolean(friendAction)} onclick={() => acceptFriendRequest(request)}',
+    'disabled={Boolean(friendAction)} onclick={() => declineFriendRequest(request)}',
+    'disabled={Boolean(friendAction)} onclick={() => sendFriendRequest(candidate)}',
+    'disabled={Boolean(friendAction)} onclick={() => acceptSearchResult(candidate)}',
+    'disabled={Boolean(friendAction)} onclick={() => removeFriend(friend)}'
+  ]) {
+    assert.ok(page.includes(expression), `Missing global friend-action lock on: ${expression}`);
+  }
+});
