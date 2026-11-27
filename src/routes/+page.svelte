@@ -15,7 +15,7 @@
     loadPublicProfile,
     saveProfileBasics,
     saveProfileSports,
-    saveNotificationPreferences,
+    saveUserSettings,
     saveAccountProfile,
     normalizeProfileHandle
   } from '$lib/data/profile.js';
@@ -1895,17 +1895,13 @@
     if (settingsSaving || !session) return;
     settingsSaving = true;
     try {
-      const { error } = await saveNotificationPreferences(session.id, {
+      const { error } = await saveUserSettings({
         eventNotifications: settingsDraft.eventNotifications,
         friendNotifications: settingsDraft.friendNotifications,
-        ratingNotifications: settingsDraft.ratingNotifications
+        ratingNotifications: settingsDraft.ratingNotifications,
+        showContact: settingsDraft.showContact
       });
       if (error) throw error;
-
-      const contactError = await saveAccountProfile(session.id, {
-        contactVisible: settingsDraft.showContact
-      });
-      if (contactError) throw contactError;
 
       userProfile = { ...userProfile, settings: { ...settingsDraft } };
       profileSheet = null;
