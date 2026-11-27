@@ -3065,4 +3065,58 @@ textarea:focus-visible {
   font: 800 11px/1.4 Quicksand, sans-serif;
 }
 
+
+
+/* Friend requests: keep the profile and both actions in separate grid columns. */
+.request-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 0;
+}
+
+.request-person {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.request-person .friend-copy {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.request-person .friend-copy strong,
+.request-person .friend-copy small {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.request-action {
+  min-width: 60px;
+  min-height: 36px;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 360px) {
+  .request-row {
+    gap: 6px;
+    padding: 12px 0;
+  }
+
+  .request-action {
+    min-width: 56px;
+    padding: 7px 7px;
+    font-size: 9px;
+  }
+}
+
 </style>
