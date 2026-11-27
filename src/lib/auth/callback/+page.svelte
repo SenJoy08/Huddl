@@ -7,43 +7,49 @@
   let loading = true;
 
   onMount(async () => {
-    const code = new URLSearchParams(window.location.search).get('code');
-    const next = new URLSearchParams(window.location.search).get('next') || '/onboarding';
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+      const next = params.get('next') || '/onboarding';
 
-    if (!code) {
-      error = 'Missing authentication code.';
-      loading = false;
-      return;
-    }
-
-    const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-
-    if (exchangeError) {
-      error = exchangeError.message;
-      loading = false;
-      return;
-    }
-
-    const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/onboarding';
-    const { data: authData } = await supabase.auth.getUser();
-    if (authData.user) {
-      const { data: savedSports, error: sportsError } = await supabase
-        .from('profile_sports')
-        .select('sport_id')
-        .eq('profile_id', authData.user.id)
-        .limit(1);
-      // A read failure should fall back to the app's normal profile gate.
-      // The gate sends incomplete accounts to onboarding.
-      if (sportsError) {
-        goto('/');
+      if (!code) {
+        error = 'Missing authentication code. Request a new confirmation email and try again.';
+        loading = false;
         return;
       }
-      if (savedSports?.length) {
-        goto('/');
+
+      const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+      if (exchangeError) {
+        error = exchangeError.message || 'This confirmation link is invalid or has expired.';
+        loading = false;
         return;
       }
+
+      const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/onboarding';
+      const { data: authData, error: userError } = await supabase.auth.getUser();
+      if (userError) throw userError;
+
+      if (authData.user) {
+        const { data: savedSports, error: sportsError } = await supabase
+          .from('profile_sports')
+          .select('sport_id')
+          .eq('profile_id', authData.user.id)
+          .limit(1);
+
+        // A read failure should fall back to the app's normal profile gate.
+        // The gate sends incomplete accounts to onboarding.
+        if (sportsError || savedSports?.length) {
+          goto('/');
+          return;
+        }
+      }
+
+      goto(safeNext);
+    } catch (callbackError) {
+      console.error('Authentication callback failed:', callbackError);
+      error = 'Could not complete confirmation. Check your connection and try the link again.';
+      loading = false;
     }
-    goto(safeNext);
   });
 </script>
 
