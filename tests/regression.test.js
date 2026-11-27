@@ -150,3 +150,40 @@ test('incoming friend request card keeps the profile, accept, and decline in sep
   assert.match(page, /class="request-action accept"/);
   assert.match(page, /class="request-action decline"/);
 });
+
+
+test('personal attendance stats ignore unreviewed memberships like public player stats', async () => {
+  const { calculateAttendancePercent } = await import('../src/lib/data/stats-utils.js');
+  assert.equal(calculateAttendancePercent([
+    { showed_up: true },
+    { showed_up: false },
+    { showed_up: null }
+  ]), 50);
+  assert.equal(calculateAttendancePercent([
+    { showed_up: true },
+    { showed_up: true }
+  ]), 100);
+  assert.equal(calculateAttendancePercent([
+    { showed_up: null },
+    { showed_up: undefined }
+  ]), null);
+  assert.equal(calculateAttendancePercent([]), null);
+});
+
+test('notification and contact preferences save through one authenticated transaction', async () => {
+  const profileData = await readFile(new URL('../src/lib/data/profile.js', import.meta.url), 'utf8');
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  const migration = await readFile(
+    new URL('../supabase/migrations/20261127100000_make_profile_settings_save_atomic.sql', import.meta.url),
+    'utf8'
+  );
+  assert.match(profileData, /supabase\.rpc\('save_user_settings'/);
+  assert.match(page, /const \{ error \} = await saveUserSettings\(/);
+  assert.doesNotMatch(page, /await saveNotificationPreferences\(session\.id/);
+  assert.doesNotMatch(page, /const contactError = await saveAccountProfile\(session\.id/);
+  assert.match(migration, /security definer[\s\S]*set search_path = ''/i);
+  assert.match(migration, /v_user_id uuid := auth\.uid\(\)/);
+  assert.match(migration, /update public\.profiles[\s\S]*insert into public\.notification_preferences[\s\S]*on conflict \(user_id\)/i);
+  assert.match(migration, /revoke all on function public\.save_user_settings\([\s\S]*from public, anon/i);
+  assert.match(migration, /grant execute on function public\.save_user_settings\([\s\S]*to authenticated/i);
+});
