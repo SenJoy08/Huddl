@@ -187,3 +187,29 @@ test('notification and contact preferences save through one authenticated transa
   assert.match(migration, /revoke all on function public\.save_user_settings\([\s\S]*from public, anon/i);
   assert.match(migration, /grant execute on function public\.save_user_settings\([\s\S]*to authenticated/i);
 });
+
+
+test('password reset handles rejected session and password update requests', async () => {
+  const page = await readFile(new URL('../src/routes/reset-password/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /catch \(sessionError\)[\s\S]*?Could not verify this reset link/);
+  assert.match(page, /catch \(passwordError\)[\s\S]*?Could not update your password right now/);
+  assert.match(page, /finally \{\s*loading = false;/);
+});
+
+test('authentication callback reports network failures instead of remaining on loading screen', async () => {
+  const callback = await readFile(new URL('../src/lib/auth/callback/+page.svelte', import.meta.url), 'utf8');
+  assert.match(callback, /catch \(callbackError\)[\s\S]*?Could not complete confirmation/);
+  assert.match(callback, /error = 'Missing authentication code\. Request a new confirmation email and try again\.'/);
+});
+
+test('signup confirmation instructions are announced as a status, not an error', async () => {
+  const signup = await readFile(new URL('../src/routes/signup/+page.svelte', import.meta.url), 'utf8');
+  assert.match(signup, /notice = 'Account created\. Check your email to confirm your account, then use the link to finish setup\.'/);
+  assert.match(signup, /<p class="notice" role="status">\{notice\}<\/p>/);
+});
+
+test('local Supabase auth redirect allowlist includes the actual Vite development origins', async () => {
+  const config = await readFile(new URL('../supabase/config.toml', import.meta.url), 'utf8');
+  assert.match(config, /site_url = "http:\/\/localhost:5173"/);
+  assert.match(config, /additional_redirect_urls = \["http:\/\/localhost:5173", "http:\/\/127\.0\.0\.1:5173"/);
+});
