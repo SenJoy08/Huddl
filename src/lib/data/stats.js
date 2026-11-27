@@ -1,4 +1,5 @@
 import { supabase } from '$lib/supabase/client.js';
+import { calculateAttendancePercent } from './stats-utils.js';
 
 /**
  * @typedef {{ games: number, hosted: number, rating: number|null, ratingCount: number, attendance: number|null, sports: { name: string, games: number }[] }} HuddlStats
@@ -104,10 +105,7 @@ async function loadStatsForUser(userId) {
     ? Math.round((receivedScores.reduce((sum, score) => sum + score, 0) / receivedScores.length) * 10) / 10
     : null;
 
-  const knownAttendance = completedMemberships.filter((row) => row.showed_up !== null && row.showed_up !== undefined);
-  const attendance = completedMemberships.length > 0 && knownAttendance.length === completedMemberships.length
-    ? Math.round((knownAttendance.filter((row) => row.showed_up === true).length / knownAttendance.length) * 100)
-    : null;
+  const attendance = calculateAttendancePercent(completedMemberships);
 
   return {
     games: completedEventIds.length,
