@@ -301,6 +301,24 @@ export async function saveNotificationPreferences(userId, values) {
   return { error };
 }
 
+
+/**
+ * Save notification preferences and contact visibility in one database
+ * transaction. The database derives the target user from auth.uid().
+ * @param {{eventNotifications:boolean,friendNotifications:boolean,ratingNotifications:boolean,showContact:boolean}} values
+ * @returns {Promise<{error: Error | null}>}
+ */
+export async function saveUserSettings(values) {
+  const { error } = await supabase.rpc('save_user_settings', {
+    p_event_updates: values.eventNotifications,
+    p_friend_updates: values.friendNotifications,
+    p_rating_reminders: values.ratingNotifications,
+    p_contact_visible: values.showContact
+  });
+
+  return { error };
+}
+
 /** @param {string} userId @param {{phone?:string,contactVisible?:boolean}} values */
 export async function saveAccountProfile(userId, values) {
   const payload = {
