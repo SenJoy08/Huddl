@@ -135,3 +135,18 @@ test('friend mutations serialize actions and disable all competing friend contro
     assert.ok(page.includes(expression), `Missing global friend-action lock on: ${expression}`);
   }
 });
+
+
+test('incoming friend request card keeps the profile, accept, and decline in separate columns', async () => {
+  const page = await readFile(new URL('../src/routes/+page.svelte', import.meta.url), 'utf8');
+  assert.match(
+    page,
+    /\.request-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto\s+auto;/
+  );
+  assert.match(page, /\.request-person\s*\{[^}]*min-width:\s*0;/);
+  assert.match(page, /\.request-person \.friend-copy\s*\{[^}]*min-width:\s*0;/);
+  assert.match(page, /\.request-action\s*\{[^}]*min-width:\s*60px;[^}]*white-space:\s*nowrap;/);
+  assert.match(page, /@media\s*\(max-width:\s*360px\)\s*\{\s*\.request-row\s*\{[^}]*gap:\s*6px;/);
+  assert.match(page, /class="request-action accept"/);
+  assert.match(page, /class="request-action decline"/);
+});
