@@ -32,4 +32,6 @@
   .eyebrow{margin:0 0 7px;font:800 11px Quicksand;letter-spacing:.09em;color:#777}.auth-card h1{margin:0;font:900 31px/1.02 Nunito;letter-spacing:-.03em}.subtitle{margin:9px 0 0;color:#777;font:700 12px/1.45 Quicksand}
   .footer-note{margin:24px auto 0;color:#888;text-align:center;font:700 10px Quicksand}
   .auth-orb{position:absolute;border:2px solid #171717;border-radius:50%;opacity:.6}.orb-one{width:150px;height:150px;background:#ffe5d4;right:-95px;top:105px}.orb-two{width:105px;height:105px;background:#e9e5ff;left:-62px;bottom:90px}
+  :global(:focus-visible){outline:3px solid #7e9fe7;outline-offset:3px}
+  @media (prefers-reduced-motion:reduce){:global(*),:global(*::before),:global(*::after){scroll-behavior:auto!important;transition-duration:0.01ms!important;animation-duration:0.01ms!important;animation-iteration-count:1!important}}
 </style>

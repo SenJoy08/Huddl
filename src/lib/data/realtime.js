@@ -68,7 +68,8 @@ export function subscribeToEventMessages(eventId, onMessage, onStatus) {
       {
         event: 'INSERT',
         schema: 'public',
-        table: 'event_messages'
+        table: 'event_messages',
+        filter: `event_id=eq.${eventId}`
       },
       (payload) => {
         if (String(payload.new?.event_id ?? '') === String(eventId)) {
@@ -81,7 +82,8 @@ export function subscribeToEventMessages(eventId, onMessage, onStatus) {
       {
         event: 'UPDATE',
         schema: 'public',
-        table: 'event_messages'
+        table: 'event_messages',
+        filter: `event_id=eq.${eventId}`
       },
       (payload) => {
         if (String(payload.new?.event_id ?? payload.old?.event_id ?? '') === String(eventId)) {

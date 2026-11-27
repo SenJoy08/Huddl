@@ -1,6 +1,8 @@
 <script>
   import EventCard from '$lib/components/EventCard.svelte';
-  import { loadEventMessages, sendEventMessage } from '$lib/data/chat.js';
+  import EventDetailsGrid from '$lib/components/EventDetailsGrid.svelte';
+  import EventPlayersPanel from '$lib/components/EventPlayersPanel.svelte';
+  import { loadEventMessages, sendEventMessage, mergeChatMessage } from '$lib/data/chat.js';
   import BottomNav from '$lib/components/BottomNav.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { loadGameCatalog } from '$lib/data/catalog.js';
@@ -13,8 +15,9 @@
     loadPublicProfile,
     saveProfileBasics,
     saveProfileSports,
-    saveNotificationPreferences,
-    saveAccountProfile
+    saveUserSettings,
+    saveAccountProfile,
+    normalizeProfileHandle
   } from '$lib/data/profile.js';
   import {
     loadSportEvents,
@@ -45,10 +48,11 @@
   import { subscribeToHuddlRealtime, subscribeToEventMessages } from '$lib/data/realtime.js';
   import { supabase } from '$lib/supabase/client.js';
   import { onDestroy, onMount } from 'svelte';
+  import { backOut, cubicIn } from 'svelte/easing';
   import { fade, fly, scale, slide } from 'svelte/transition';
   import { goto } from '$app/navigation';
 
-  /** @typedef {{ id: string, sport: string, title: string, startsAt?: string, date: string, dateValue?: string, time?: string, location: string, host: string, hostId?: string, members: number, capacity: number, skill: string, color: string, description: string, visibility?: string, status?: string, pendingRequests?: number, pendingRequestId?: string | null, isMember?: boolean, ratingsSubmitted?: boolean, eventType?: 'sport' | 'esports', platform?: string | null, gameMode?: string | null, gameId?: string, memberProfiles?: { id:string, name:string, handle:string, color:string }[] }} MockEvent */
+  /** @typedef {{ id: string, sport: string, title: string, startsAt?: string, date: string, dateValue?: string, time?: string, location: string, host: string, hostId?: string, members: number, capacity: number, skill: string, color: string, description: string, visibility?: string, status?: string, pendingRequests?: number, pendingRequestId?: string | null, hasRequested?: boolean, isMember?: boolean, ratingsSubmitted?: boolean, eventType?: 'sport' | 'esports', platform?: string | null, gameMode?: string | null, gameId?: string, memberProfiles?: { id:string, name:string, handle:string, color:string }[] }} MockEvent */
   /** @typedef {{ games: number, hosted: number, rating: number|null, ratingCount: number, attendance: number|null, sports: { name: string, games: number }[] }} HuddlStats */
   /** @typedef {{ title: string, eventType: 'sport' | 'esports', sport: string, gameId: string, platform: string, gameMode: string, dateValue: string, time: string, location: string, capacity: number, skill: string, visibility: string, description: string }} EventForm */
 
@@ -61,6 +65,8 @@
     if (normalized.includes('not authenticated') || normalized.includes('jwt') || normalized.includes('session')) return 'Your session has expired. Please log in again.';
     if (normalized.includes('duplicate') || normalized.includes('already exists') || normalized.includes('unique constraint')) return 'That already exists. Try a different value.';
     if (normalized.includes('permission') || normalized.includes('not allowed') || normalized.includes('forbidden')) return 'You do not have permission to do that.';
+    if (normalized.includes('cannot be completed before its start time')) return 'You can finish this event after its scheduled start time.';
+    if (normalized.includes('only the event host can complete this event')) return 'Only the event host can finish this event.';
     if (normalized.includes('no longer joinable') || normalized.includes('event is full')) return 'This game is no longer available to join.';
     return fallback;
   }
@@ -101,9 +107,13 @@
   let statsLoadError = '';
   let notificationsLoadError = '';
   let chatLoadError = '';
+  let chatSendError = '';
+  let chatRealtimeUnavailable = false;
   let ratingLoadError = '';
   let profileLoadError = '';
   let profileSaving = false;
+  let profileEditorError = '';
+  let sportsEditorError = '';
   let sportsSaving = false;
   let settingsSaving = false;
   let accountSaving = false;
@@ -117,12 +127,26 @@
   let chatLoading = false;
   /** @type {ReturnType<typeof setInterval> | null} */
   let chatPollTimer = null;
+  // Discards asynchronous chat callbacks after switching chats or closing the sheet.
+  let chatSessionVersion = 0;
   /** IDs of games the current user has joined (or hosts). */
   let joinedEventIds = new Set();
   /** @type {MockEvent | null} */
   let ratingEvent = null;
   let search = '';
   let notice = '';
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let noticeTimer = null;
+
+  /** @param {string} message */
+  function showNotice(message) {
+    if (noticeTimer !== null) clearTimeout(noticeTimer);
+    notice = message;
+    noticeTimer = setTimeout(() => {
+      notice = '';
+      noticeTimer = null;
+    }, 1000);
+  }
   /** @type {{ value: string, label: string }[]} */
   let dateOptions = [];
   /** @type {EventForm} */
@@ -157,6 +181,8 @@
   /** @type {PublicPlayerProfile | null} */
   let selectedPlayerProfile = null;
   let playerProfileLoading = false;
+  // Ignore results from profile requests that have been superseded or closed.
+  let playerProfileLoadVersion = 0;
   /** @type {MockProfile} */
   let userProfile = { ...DEFAULT_PROFILE };
   /** @type {'profile' | 'sports' | 'account' | 'notifications' | 'events' | null} */
@@ -200,6 +226,8 @@
   /** @type {RatingPlayer[]} */
   let ratingPlayers = [];
   let ratingLoading = false;
+  let ratingSubmitting = false;
+  let ratingSessionVersion = 0;
   let sports = ['All'];
   /** @type {{ id: string, slug: string, name: string, platform?: string | null }[]} */
   let esportsGames = [];
@@ -211,7 +239,7 @@
   let eventTypeOpen = false;
   let eventSkillOpen = false;
   let visibilityOpen = false;
-  /** @typedef {{ id: string, senderId: string, sender: string, text: string, time: string, mine?: boolean }} ChatMessage */
+  /** @typedef {{ id: string, eventId: string, senderId: string, sender: string, text: string, time: string, createdAt: string, mine: boolean }} ChatMessage */
   /** @type {Record<string, ChatMessage[]>} */
   let chatMessages = {};
 
@@ -250,6 +278,11 @@
       }
 
       userProfile = /** @type {MockProfile} */ (dbProfile);
+      if (!Array.isArray(dbProfile.sports) || dbProfile.sports.length === 0) {
+        checkingAuth = false;
+        goto('/onboarding');
+        return;
+      }
       session = { ...session, name: dbProfile.name };
       const catalog = await loadGameCatalog();
       sports = Array.isArray(catalog?.sports) && catalog.sports.length ? catalog.sports : ['All'];
@@ -314,7 +347,7 @@
       visibilityCleanup = cleanupVisibilityListeners;
     } catch (loadError) {
       console.error('Failed to load Huddl:', loadError);
-      notice = loadError instanceof Error ? loadError.message : 'Could not load Huddl data';
+      showNotice(loadError instanceof Error ? loadError.message : 'Could not load Huddl data');
     }
 
     if (!dateOptions.length) dateOptions = buildDateOptions();
@@ -333,7 +366,7 @@
           ? eventList.filter((event) => event.eventType === 'esports' && event.gameId === filter.slice(7))
           : eventList.filter((event) => event.eventType !== 'esports' && event.sport === filter)
   )
-    .filter((event) => event.status === 'upcoming' || event.status === 'full')
+    .filter((event) => (event.status === 'upcoming' || event.status === 'full') && eventStartTimestamp(event) > Date.now())
     .filter((event) => {
       if (eventAvailabilityFilter === 'open') return event.members < event.capacity;
       if (eventAvailabilityFilter === 'full') return event.members >= event.capacity;
@@ -349,7 +382,7 @@
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const eventDate = new Date(`${event.dateValue}T12:00:00`);
-      if (eventTimeFilter === 'today') return eventDate.getTime() === today.getTime();
+      if (eventTimeFilter === 'today') return event.dateValue === toDateValue(today);
       if (eventTimeFilter === 'week') {
         const weekEnd = new Date(today);
         weekEnd.setDate(today.getDate() + 7);
@@ -726,12 +759,15 @@
   /** @param {string} id */
   function navigate(id) {
     if (id !== 'home' && id !== 'friends' && id !== 'stats' && id !== 'profile') return;
+    if (ratingSubmitting) return;
     active = id;
     if (id === 'stats' && session?.id) void refreshStats(session.id);
     hasSelectedEvent = false;
     selectedEvent = null;
+    playerProfileLoadVersion += 1;
     selectedPlayerProfile = null;
     playerProfileLoading = false;
+    profileLoadError = '';
     showCreate = false;
     showEdit = false;
     calendarOpen = false;
@@ -742,11 +778,8 @@
     eventSkillOpen = false;
     visibilityOpen = false;
     showNotifications = false;
-    showRating = false;
-    ratingEvent = null;
-    showChat = false;
-    chatEvent = null;
-    chatDraft = '';
+    closeRatingSheet();
+    closeChat();
     profileSheet = null;
     passwordSheetOpen = false;
     passwordDraft = { password: '', confirmPassword: '' };
@@ -758,6 +791,20 @@
     eventTimeFilter = 'all';
     eventAvailabilityFilter = 'all';
     eventSkillFilter = 'all';
+  }
+
+  /** @param {string} dateValue @param {string} timeValue */
+  function isFutureLocalDateTime(dateValue, timeValue) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue) || !/^\d{2}:\d{2}$/.test(timeValue)) return false;
+    const [year, month, day] = dateValue.split('-').map(Number);
+    const [hours, minutes] = timeValue.split(':').map(Number);
+    const parsed = new Date(year, month - 1, day, hours, minutes, 0, 0);
+    const exactDateTime = parsed.getFullYear() === year
+      && parsed.getMonth() === month - 1
+      && parsed.getDate() === day
+      && parsed.getHours() === hours
+      && parsed.getMinutes() === minutes;
+    return exactDateTime && parsed.getTime() > Date.now();
   }
 
   /** @param {MockEvent} event */
@@ -874,8 +921,7 @@
     eventAction = 'logout';
     const { error } = await signOut();
     if (error) {
-      notice = userFacingError(error, 'Could not save that change.');
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(userFacingError(error, 'Could not save that change.'));
       eventAction = '';
       return;
     }
@@ -897,40 +943,58 @@
     showChat = true;
     chatEvent = null;
     chatDraft = '';
+    chatSendError = '';
+    chatRealtimeUnavailable = false;
+  }
+
+  function backToChatHub() {
+    // Invalidate in-flight initial loads and stop the previous event's stream.
+    chatSessionVersion += 1;
+    chatUnsubscribe?.();
+    chatUnsubscribe = null;
+    if (chatPollTimer !== null) {
+      clearInterval(chatPollTimer);
+      chatPollTimer = null;
+    }
+    chatEvent = null;
+    chatDraft = '';
+    chatLoading = false;
+    chatLoadError = '';
+    chatSendError = '';
+    chatRealtimeUnavailable = false;
   }
 
   async function joinSelectedEvent() {
     if (eventAction || !selectedEvent || selectedEvent.status === 'cancelled' || selectedEvent.status === 'completed') return;
     if (eventStartTimestamp(selectedEvent) <= Date.now()) {
-      notice = 'This event has already started';
+      showNotice('This event has already started');
       return;
     }
     if (selectedEvent.members >= selectedEvent.capacity) {
-      notice = 'This game is full';
+      showNotice('This game is full');
       return;
     }
     eventAction = 'join';
     try {
       if (selectedEvent.visibility === 'Private') {
         const result = await requestPrivateEvent(selectedEvent.id);
-        notice = result === 'full'
+        showNotice(result === 'full'
           ? 'This game is full'
           : result === 'already_member'
             ? 'You are already in this game'
             : result === 'already_pending'
               ? 'Your join request is already pending'
-              : 'Join request sent';
+              : 'Join request sent');
       } else {
         const result = await joinPublicEvent(selectedEvent.id);
-        notice = result === 'full' ? 'This game is full' : result === 'already_member' ? 'You are already in this game' : 'You joined the game';
+        showNotice(result === 'full' ? 'This game is full' : result === 'already_member' ? 'You are already in this game' : 'You joined the game');
       }
       await refreshEvents();
     } catch (joinError) {
-      notice = userFacingError(joinError, 'Could not join this game.');
+      showNotice(userFacingError(joinError, 'Could not join this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function leaveSelectedEvent() {
@@ -938,14 +1002,13 @@
     eventAction = 'leave';
     try {
       const result = await leaveEvent(selectedEvent.id);
-      notice = result === 'not_member' ? 'You are not in this game' : 'You left the game';
+      showNotice(result === 'not_member' ? 'You are not in this game' : 'You left the game');
       await refreshEvents();
     } catch (leaveError) {
-      notice = userFacingError(leaveError, 'Could not leave this game.');
+      showNotice(userFacingError(leaveError, 'Could not leave this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   function startCreate() {
@@ -963,12 +1026,20 @@
 
   async function create() {
     if (creatingEvent) return;
-    if (!newEvent.title || !newEvent.dateValue || !newEvent.time || !newEvent.location || Number(newEvent.capacity) < 2) {
-      notice = 'Fill in all required fields';
+    if (!newEvent.title.trim() || !newEvent.dateValue || !newEvent.time || !newEvent.location.trim()) {
+      showNotice('Add a title, date, time, and location');
+      return;
+    }
+    if (!Number.isInteger(Number(newEvent.capacity)) || Number(newEvent.capacity) < 2) {
+      showNotice('Capacity must be a whole number of at least 2');
+      return;
+    }
+    if (!isFutureLocalDateTime(newEvent.dateValue, newEvent.time)) {
+      showNotice('Choose a date and time in the future');
       return;
     }
     if (newEvent.eventType === 'esports' && !newEvent.gameId) {
-      notice = 'Choose an esports game';
+      showNotice('Choose an esports game');
       return;
     }
 
@@ -987,13 +1058,12 @@
       eventAvailabilityFilter = 'all';
       eventSkillFilter = 'all';
       await refreshEvents();
-      notice = eventId ? 'Event created' : 'Event created';
+      showNotice('Event created');
     } catch (createError) {
-      notice = userFacingError(createError, 'Could not create this game.');
+      showNotice(userFacingError(createError, 'Could not create this game.'));
     } finally {
       creatingEvent = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {MockEvent | null} event */
@@ -1028,8 +1098,16 @@
 
   async function saveEdit() {
     if (eventSaving) return;
-    if (!selectedEvent || !editEvent.title || !editEvent.dateValue || !editEvent.time || !editEvent.location) {
-      notice = 'Fill in all required fields';
+    if (!selectedEvent || !editEvent.title.trim() || !editEvent.dateValue || !editEvent.time || !editEvent.location.trim()) {
+      showNotice('Add a title, date, time, and location');
+      return;
+    }
+    if (!Number.isInteger(Number(editEvent.capacity)) || Number(editEvent.capacity) < 2) {
+      showNotice('Capacity must be a whole number of at least 2');
+      return;
+    }
+    if (!isFutureLocalDateTime(editEvent.dateValue, editEvent.time)) {
+      showNotice('Choose a date and time in the future');
       return;
     }
     editEvent = { ...editEvent, capacity: Math.max(Number(editEvent.capacity), selectedEvent.members) };
@@ -1039,13 +1117,12 @@
       else await updateSportEvent(selectedEvent.id, editEvent);
       await refreshEvents();
       showEdit = false;
-      notice = 'Event updated';
+      showNotice('Event updated');
     } catch (updateError) {
-      notice = userFacingError(updateError, 'Could not update this game.');
+      showNotice(userFacingError(updateError, 'Could not update this game.'));
     } finally {
       eventSaving = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function cancelSelectedEvent() {
@@ -1055,48 +1132,58 @@
       await setEventStatus(selectedEvent.id, 'cancelled');
       await refreshEvents();
       hasSelectedEvent = false;
-      notice = 'Event cancelled';
+      showNotice('Event cancelled');
     } catch (cancelError) {
-      notice = userFacingError(cancelError, 'Could not cancel this game.');
+      showNotice(userFacingError(cancelError, 'Could not cancel this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function finishSelectedEvent() {
-    if (eventAction || !selectedEvent || !isEventHostById(selectedEvent.hostId ?? '')) return;
+    const eventToFinish = selectedEvent;
+    if (eventAction || !eventToFinish || !isEventHostById(eventToFinish.hostId ?? '')) return;
+
+    // The completion RPC rejects events that have not reached their scheduled start.
+    if (eventStartTimestamp(eventToFinish) > Date.now()) {
+      showNotice('You can finish this event after its scheduled start time.');
+      return;
+    }
+
     eventAction = 'finish';
-    const eventBeforeFinish = selectedEvent;
     try {
-      await setEventStatus(selectedEvent.id, 'completed');
-      await refreshEvents();
-      await refreshStats();
+      const result = await setEventStatus(eventToFinish.id, 'completed');
+      if (result !== 'completed') throw new Error('The event was not marked as completed.');
+
+      const completedEvent = { ...eventToFinish, status: 'completed', ratingsSubmitted: false };
+      await Promise.all([refreshEvents(), refreshStats()]);
       hasSelectedEvent = false;
-      const ratingOpened = await openRating(eventBeforeFinish);
-      if (!ratingOpened) return;
-      notice = 'Event marked complete';
+
+      // The event is complete even when there are no other players to rate or
+      // the rating sheet cannot load. Do not turn a successful completion into
+      // a failed finish action because of a separate rating UI issue.
+      const ratingOpened = await openRating(completedEvent);
+      if (ratingOpened) showNotice('Event marked complete');
+      else if (!showRating && !notice) showNotice('Event marked complete');
     } catch (finishError) {
-      notice = userFacingError(finishError, 'Could not finish this game.');
+      showNotice(userFacingError(finishError, 'Could not finish this game.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function acceptRequest() {
     if (eventAction || !selectedEvent || !selectedEvent.pendingRequests || !selectedEvent.pendingRequestId) return;
     eventAction = 'accept-request';
     try {
-      await decideEventJoinRequest(selectedEvent.pendingRequestId, true);
+      const decision = await decideEventJoinRequest(selectedEvent.pendingRequestId, true);
       await refreshEvents();
-      notice = 'Request accepted';
+      showNotice(decision === 'full' ? 'Event is full; request was declined' : 'Request accepted');
     } catch (acceptError) {
-      notice = userFacingError(acceptError, 'Could not accept the request.');
+      showNotice(userFacingError(acceptError, 'Could not accept the request.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function rejectRequest() {
@@ -1105,13 +1192,12 @@
     try {
       await decideEventJoinRequest(selectedEvent.pendingRequestId, false);
       await refreshEvents();
-      notice = 'Request declined';
+      showNotice('Request declined');
     } catch (rejectError) {
-      notice = userFacingError(rejectError, 'Could not decline the request.');
+      showNotice(userFacingError(rejectError, 'Could not decline the request.'));
     } finally {
       eventAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function openPendingRequestProfile() {
@@ -1130,14 +1216,16 @@
 
       await openPlayerProfile(data.user_id);
     } catch (requestError) {
-      notice = userFacingError(requestError, 'Could not open the requester profile.');
-      setTimeout(() => (notice = ''), 2200);
+      showNotice(userFacingError(requestError, 'Could not open the requester profile.'));
     }
   }
 
   /** @param {MockEvent} event */
   async function openRating(event) {
-    if (event.ratingsSubmitted || !session || event.hostId !== session.id) return false;
+    if (!session || event.status !== 'completed' || !event.isMember || ratingSubmitting) return false;
+    const isHost = event.hostId === session.id;
+    if (isHost && event.ratingsSubmitted) return false;
+    const loadVersion = ++ratingSessionVersion;
 
     ratingEvent = event;
     ratingPlayers = [];
@@ -1148,16 +1236,18 @@
 
     try {
       const players = await loadRatingPlayers(event.id, session.id);
+      if (loadVersion !== ratingSessionVersion || ratingEvent?.id !== event.id) return false;
 
       if (!players.length) {
-        await markHostRatingsComplete(event.id);
-        const completedEvent = { ...event, ratingsSubmitted: true };
-        eventList = eventList.map((item) => item.id === event.id ? completedEvent : item);
-        if (selectedEvent?.id === event.id) selectedEvent = completedEvent;
+        if (isHost) {
+          await markHostRatingsComplete(event.id);
+          const completedEvent = { ...event, ratingsSubmitted: true };
+          eventList = eventList.map((item) => item.id === event.id ? completedEvent : item);
+          if (selectedEvent?.id === event.id) selectedEvent = completedEvent;
+        }
         showRating = false;
         ratingEvent = null;
-        notice = 'Ratings complete';
-        setTimeout(() => (notice = ''), 1800);
+        showNotice(isHost ? 'Ratings complete' : 'There are no other players to rate');
         return false;
       }
 
@@ -1176,17 +1266,27 @@
 
       ratingDrafts = drafts;
     } catch (ratingError) {
+      if (loadVersion !== ratingSessionVersion || ratingEvent?.id !== event.id) return false;
       ratingLoadError = userFacingError(ratingError, 'Could not load players to rate right now.');
-      notice = ratingLoadError;
-      setTimeout(() => (notice = ''), 2200);
+      showNotice(ratingLoadError);
     } finally {
-      ratingLoading = false;
+      if (loadVersion === ratingSessionVersion) ratingLoading = false;
     }
 
-    return ratingEvent !== null;
+    return loadVersion === ratingSessionVersion && ratingEvent?.id === event.id;
   }
 
-  /** @param {MockEvent} event */
+  function closeRatingSheet() {
+    if (ratingSubmitting) return;
+    ratingSessionVersion += 1;
+    showRating = false;
+    ratingEvent = null;
+    ratingPlayers = [];
+    ratingDrafts = {};
+    ratingLoadError = '';
+    ratingLoading = false;
+  }
+
   /**
    * Normalize chat messages for the initials-only avatar UI.
    * @param {ChatMessage[]} messages
@@ -1202,6 +1302,7 @@
   /** @param {MockEvent} event */
   async function openChat(event) {
     if (!isChatAvailable(event) || !session) return;
+    const loadVersion = ++chatSessionVersion;
 
     chatUnsubscribe?.();
     chatUnsubscribe = null;
@@ -1215,6 +1316,8 @@
     chatDraft = '';
     chatLoading = true;
     chatLoadError = '';
+    chatSendError = '';
+    chatRealtimeUnavailable = false;
 
     const eventId = String(event.id);
     const userId = session.id;
@@ -1224,43 +1327,60 @@
     chatUnsubscribe = subscribeToEventMessages(
       eventId,
       async (payload) => {
-        if (!session || String(payload.new?.event_id ?? '') !== eventId) return;
+        if (loadVersion !== chatSessionVersion || !session || String(payload.new?.event_id ?? '') !== eventId) return;
         try {
-          const freshMessages = await loadEventMessages(eventId, session.id);
-          chatMessages = { ...chatMessages, [eventId]: await hydrateChatAvatars(freshMessages) };
+          const freshMessages = await loadEventMessages(eventId, userId);
+          const hydratedMessages = await hydrateChatAvatars(freshMessages);
+          if (loadVersion !== chatSessionVersion) return;
+          chatMessages = { ...chatMessages, [eventId]: hydratedMessages };
         } catch (messageError) {
-          console.error('Live chat refresh failed:', messageError);
+          if (loadVersion === chatSessionVersion) console.error('Live chat refresh failed:', messageError);
         }
       },
       (status) => {
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          console.warn('Huddl chat realtime status:', status);
+          if (loadVersion === chatSessionVersion) {
+            chatRealtimeUnavailable = true;
+            console.warn('Huddl chat realtime status:', status);
+          }
+        } else if (status === 'SUBSCRIBED' && loadVersion === chatSessionVersion) {
+          chatRealtimeUnavailable = false;
         }
       }
     );
 
     try {
       const messages = await loadEventMessages(eventId, userId);
-      chatMessages = { ...chatMessages, [eventId]: await hydrateChatAvatars(messages) };
+      const hydratedMessages = await hydrateChatAvatars(messages);
+      if (loadVersion !== chatSessionVersion) return;
+      chatMessages = { ...chatMessages, [eventId]: hydratedMessages };
 
       // Realtime remains the primary path. This low-frequency fallback only
       // runs while the chat sheet is open, so an interrupted websocket cannot
       // leave the other player's chat permanently stale.
+      let pollInFlight = false;
       chatPollTimer = setInterval(async () => {
-        if (!chatEvent || !session || String(chatEvent.id) !== eventId) return;
+        if (loadVersion !== chatSessionVersion || pollInFlight || !chatEvent || !session || String(chatEvent.id) !== eventId) return;
+        pollInFlight = true;
         try {
-          const freshMessages = await loadEventMessages(eventId, session.id);
-          chatMessages = { ...chatMessages, [eventId]: await hydrateChatAvatars(freshMessages) };
+          const freshMessages = await loadEventMessages(eventId, userId);
+          const nextMessages = await hydrateChatAvatars(freshMessages);
+          if (loadVersion !== chatSessionVersion) return;
+          chatMessages = { ...chatMessages, [eventId]: nextMessages };
         } catch (messageError) {
-          console.error('Chat fallback refresh failed:', messageError);
+          if (loadVersion === chatSessionVersion) console.error('Chat fallback refresh failed:', messageError);
+        } finally {
+          pollInFlight = false;
         }
       }, 2500);
     } catch (messageError) {
-      console.error('Failed to load chat:', messageError);
-      chatLoadError = userFacingError(messageError, 'Could not load this chat right now.');
-      notice = chatLoadError;
+      if (loadVersion === chatSessionVersion) {
+        console.error('Failed to load chat:', messageError);
+        chatLoadError = userFacingError(messageError, 'Could not load this chat right now.');
+        showNotice(chatLoadError);
+      }
     } finally {
-      chatLoading = false;
+      if (loadVersion === chatSessionVersion) chatLoading = false;
     }
   }
 
@@ -1270,6 +1390,7 @@
   }
 
   function closeChat() {
+    chatSessionVersion += 1;
     chatUnsubscribe?.();
     chatUnsubscribe = null;
     if (chatPollTimer !== null) {
@@ -1281,6 +1402,8 @@
     chatDraft = '';
     chatLoading = false;
     chatLoadError = '';
+    chatSendError = '';
+    chatRealtimeUnavailable = false;
   }
 
   async function sendChatMessage() {
@@ -1289,22 +1412,34 @@
     const text = chatDraft.trim();
     chatDraft = '';
     chatSending = true;
+    chatSendError = '';
     try {
-      await sendEventMessage(eventId, text);
-      const messages = await loadEventMessages(eventId, session.id);
-      chatMessages = { ...chatMessages, [eventId]: await hydrateChatAvatars(messages) };
+      const messageId = await sendEventMessage(eventId, text);
+      const createdAt = new Date().toISOString();
+      chatMessages = {
+        ...chatMessages,
+        [eventId]: mergeChatMessage(chatMessages[eventId] ?? [], {
+          id: messageId,
+          eventId,
+          senderId: session.id,
+          sender: session.name || 'You',
+          text,
+          time: '',
+          createdAt,
+          mine: true
+        })
+      };
     } catch (messageError) {
       chatDraft = text;
-      notice = userFacingError(messageError, 'Could not send the message.');
-      setTimeout(() => (notice = ''), 2200);
+      chatSendError = userFacingError(messageError, 'Could not send the message. Please try again.');
     } finally {
       chatSending = false;
     }
   }
 
   function openSelectedEventRating() {
-    if (!selectedEvent || !session || selectedEvent.hostId !== session.id) return;
-    openRating(selectedEvent);
+    if (!selectedEvent || !session || selectedEvent.status !== 'completed' || !selectedEvent.isMember) return;
+    void openRating(selectedEvent);
   }
 
   /** @param {string} playerId @param {number} stars */
@@ -1332,7 +1467,7 @@
   }
 
   async function submitRatings() {
-    if (!ratingEvent || !session || ratingLoading) return;
+    if (!ratingEvent || !session || ratingLoading || ratingSubmitting) return;
 
     const players = ratingPlayers.map((player) => ({
       player,
@@ -1340,19 +1475,18 @@
     }));
 
     if (!players.length) {
-      notice = 'There are no other players to rate';
-      setTimeout(() => (notice = ''), 1800);
+      showNotice('There are no other players to rate');
       return;
     }
 
     const missingRatings = players.filter((item) => item.draft.showedUp && item.draft.stars < 1).length;
     if (missingRatings > 0) {
-      notice = `Rate the ${missingRatings} player${missingRatings === 1 ? '' : 's'} who showed up`;
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(`Rate the ${missingRatings} player${missingRatings === 1 ? '' : 's'} who showed up`);
       return;
     }
 
     ratingLoading = true;
+    ratingSubmitting = true;
 
     try {
       for (const item of players) {
@@ -1360,30 +1494,32 @@
           eventId: ratingEvent.id,
           playerId: item.player.id,
           stars: item.draft.stars,
-          showedUp: item.draft.showedUp,
-          skillMatch: item.draft.showedUp ? item.draft.skillMatch : null,
+          showedUp: item.player.canMarkAttendance ? item.draft.showedUp : true,
+          skillMatch: item.player.canMarkAttendance && item.draft.showedUp ? item.draft.skillMatch : null,
           note: item.draft.note
         });
       }
 
-      await markHostRatingsComplete(ratingEvent.id);
-      const ratedEvent = { ...ratingEvent, ratingsSubmitted: true };
-      ratingEvent = ratedEvent;
-      eventList = eventList.map((event) => event.id === ratedEvent.id ? ratedEvent : event);
-      if (selectedEvent?.id === ratedEvent.id) selectedEvent = ratedEvent;
+      const wasHostRating = ratingEvent.hostId === session.id;
+      if (wasHostRating) {
+        await markHostRatingsComplete(ratingEvent.id);
+        const ratedEvent = { ...ratingEvent, ratingsSubmitted: true };
+        eventList = eventList.map((event) => event.id === ratedEvent.id ? ratedEvent : event);
+        if (selectedEvent?.id === ratedEvent.id) selectedEvent = ratedEvent;
+      }
       showRating = false;
       ratingEvent = null;
       ratingPlayers = [];
       ratingDrafts = {};
       await refreshStats();
-      notice = 'Ratings submitted';
+      showNotice(wasHostRating ? 'Ratings submitted' : 'Player ratings submitted');
     } catch (ratingError) {
-      notice = userFacingError(ratingError, 'Could not submit ratings.');
+      showNotice(userFacingError(ratingError, 'Could not submit ratings.'));
     } finally {
       ratingLoading = false;
+      ratingSubmitting = false;
     }
 
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function refreshNotifications() {
@@ -1401,8 +1537,9 @@
   }
 
   async function openNotifications() {
+    if (ratingSubmitting) return;
+    closeRatingSheet();
     showNotifications = true;
-    showRating = false;
     await refreshNotifications();
   }
 
@@ -1436,8 +1573,7 @@
     } catch (notificationError) {
       console.error('Failed to mark notification read:', notificationError);
       notifications = previous;
-      notice = userFacingError(notificationError, 'Could not update the notification.');
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(userFacingError(notificationError, 'Could not update the notification.'));
     }
   }
 
@@ -1450,12 +1586,18 @@
     } catch (notificationError) {
       console.error('Failed to mark all notifications read:', notificationError);
       notifications = previous;
-      notice = userFacingError(notificationError, 'Could not update notifications.');
-      setTimeout(() => (notice = ''), 1800);
+      showNotice(userFacingError(notificationError, 'Could not update notifications.'));
     }
   }
 
   onDestroy(() => {
+    if (noticeTimer !== null) {
+      clearTimeout(noticeTimer);
+      noticeTimer = null;
+    }
+    chatSessionVersion += 1;
+    playerProfileLoadVersion += 1;
+    ratingSessionVersion += 1;
     authSubscription?.data?.subscription?.unsubscribe?.();
     authSubscription = null;
     notificationUnsubscribe?.();
@@ -1479,23 +1621,22 @@
   /** @param {FriendCandidate} candidate */
   async function sendFriendRequest(candidate) {
     const key = `send:${candidate.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     let result;
     try {
       result = await sendFriendRequestToDb(candidate.id);
     } catch (requestError) {
       console.error('Send friend request failed:', requestError);
-      notice = userFacingError(requestError, 'Could not send the friend request.');
+      showNotice(userFacingError(requestError, 'Could not send the friend request.'));
       friendAction = '';
-      setTimeout(() => (notice = ''), 2200);
       return;
     }
-    if (result === 'incoming_pending') notice = `${candidate.name} already sent you a request`;
-    else if (result === 'already_friend') notice = `You are already friends with ${candidate.name}`;
-    else if (result === 'already_pending') notice = `Request already sent to ${candidate.name}`;
-    else if (result === 'sent') notice = `Request sent to ${candidate.name}`;
-    else notice = `Request status: ${result}`;
+    if (result === 'incoming_pending') showNotice(`${candidate.name} already sent you a request`);
+    else if (result === 'already_friend') showNotice(`You are already friends with ${candidate.name}`);
+    else if (result === 'already_pending') showNotice(`Request already sent to ${candidate.name}`);
+    else if (result === 'sent') showNotice(`Request sent to ${candidate.name}`);
+    else showNotice(`Request status: ${result}`);
     if (session) {
       try {
         await refreshFriends(session.id);
@@ -1504,7 +1645,6 @@
       }
     }
     friendAction = '';
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {FriendCandidate} candidate */
@@ -1525,54 +1665,51 @@
   /** @param {IncomingFriendRequest} request */
   async function acceptFriendRequest(request) {
     const key = `accept:${request.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     try {
       await respondFriendRequest(request.id, true);
       if (session) await refreshFriends(session.id);
-      notice = `${request.name} is now your friend`;
+      showNotice(`${request.name} is now your friend`);
     } catch (requestError) {
-      notice = userFacingError(requestError, 'Could not accept the friend request.');
+      showNotice(userFacingError(requestError, 'Could not accept the friend request.'));
     } finally {
       friendAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {IncomingFriendRequest} request */
   async function declineFriendRequest(request) {
     const key = `decline:${request.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     try {
       await respondFriendRequest(request.id, false);
       if (session) await refreshFriends(session.id);
-      notice = 'Request declined';
+      showNotice('Request declined');
     } catch (requestError) {
-      notice = userFacingError(requestError, 'Could not decline the friend request.');
+      showNotice(userFacingError(requestError, 'Could not decline the friend request.'));
     } finally {
       friendAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {MockFriend} friend */
   async function removeFriend(friend) {
     const key = `remove:${friend.id}`;
-    if (friendAction === key) return;
+    if (friendAction) return;
     friendAction = key;
     try {
       await removeFriendFromDb(friend.id);
       if (session) await refreshFriends(session.id);
       selectedPlayerProfile = null;
       playerProfileLoading = false;
-      notice = `${friend.name} removed from friends`;
+      showNotice(`${friend.name} removed from friends`);
     } catch (removeError) {
-      notice = userFacingError(removeError, 'Could not remove this friend.');
+      showNotice(userFacingError(removeError, 'Could not remove this friend.'));
     } finally {
       friendAction = '';
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   /** @param {string} id */
@@ -1589,16 +1726,21 @@
     openPlayerProfile(profile.id, profile);
   }
 
-  async function openPlayerProfile(
-    /** @type {string} */ playerId,
-    /** @type {PublicPlayerProfileFallback | undefined} */ fallback = undefined
-  ) {
+  /**
+   * @param {string} playerId
+   * @param {PublicPlayerProfileFallback} [fallback]
+   */
+  async function openPlayerProfile(playerId, fallback = {}) {
     if (!playerId) return;
-    const safeFallback = fallback ?? {};
+    const loadVersion = ++playerProfileLoadVersion;
+
+    const safeFallback = fallback;
 
     if (playerId === session?.id) {
       selectedPlayerProfile = null;
       playerProfileLoading = false;
+      profileLoadError = '';
+      closeChat();
       active = 'profile';
       hasSelectedEvent = false;
       selectedEvent = null;
@@ -1629,6 +1771,7 @@
         loadPlayerStats(playerId)
       ]);
 
+      if (loadVersion !== playerProfileLoadVersion || selectedPlayerProfile?.id !== playerId) return;
       if (!profile) throw new Error('This player profile is unavailable.');
       selectedPlayerProfile = {
         ...selectedPlayerProfile,
@@ -1637,15 +1780,16 @@
         stats: playerStats
       };
     } catch (profileError) {
+      if (loadVersion !== playerProfileLoadVersion || selectedPlayerProfile?.id !== playerId) return;
       profileLoadError = userFacingError(profileError, 'Could not load this player profile right now.');
-      notice = profileLoadError;
-      setTimeout(() => (notice = ''), 2200);
+      showNotice(profileLoadError);
     } finally {
-      playerProfileLoading = false;
+      if (loadVersion === playerProfileLoadVersion) playerProfileLoading = false;
     }
   }
 
   function closePlayerProfile() {
+    playerProfileLoadVersion += 1;
     selectedPlayerProfile = null;
     playerProfileLoading = false;
     profileLoadError = '';
@@ -1653,48 +1797,43 @@
 
   function openProfileEditor() {
     profileDraft = { name: userProfile.name, handle: userProfile.handle, bio: userProfile.bio };
+    profileEditorError = '';
     profileSheet = 'profile';
   }
 
 
   async function saveProfileEditor() {
-    if (profileSaving) return;
-    profileSaving = true;
-    if (!session) { profileSaving = false; return; }
+    if (profileSaving || !session) return;
 
     const name = profileDraft.name.trim();
-    const handle = profileDraft.handle.trim().startsWith('@')
-      ? profileDraft.handle.trim()
-      : `@${profileDraft.handle.trim()}`;
-
-    if (!name || !handle.slice(1)) {
-      notice = 'Name and handle are required';
-      setTimeout(() => (notice = ''), 1800);
-      profileSaving = false;
+    if (!name) {
+      profileEditorError = 'Enter your name.';
       return;
     }
 
-    const bio = profileDraft.bio.trim() || 'Always down for a game.';
-    const { error } = await saveProfileBasics(session.id, { name, handle, bio });
+    profileSaving = true;
+    profileEditorError = '';
+    try {
+      const handle = normalizeProfileHandle(profileDraft.handle);
+      const bio = profileDraft.bio.trim() || 'Always down for a game.';
+      const { error } = await saveProfileBasics(session.id, { name, handle, bio });
+      if (error) throw error;
 
-    if (error) {
-      notice = userFacingError(error, 'Could not save that change.');
-      setTimeout(() => (notice = ''), 2200);
+      userProfile = { ...userProfile, name, handle, bio };
+      session = { ...session, name };
+      profileSheet = null;
+      showNotice('Profile updated');
+    } catch (saveError) {
+      profileEditorError = userFacingError(saveError, 'Could not save your profile. Please try again.');
+    } finally {
       profileSaving = false;
-      return;
     }
-
-    userProfile = { ...userProfile, name, handle, bio };
-    session = { ...session, name };
-    profileSheet = null;
-    profileSaving = false;
-    notice = 'Profile updated';
-    setTimeout(() => (notice = ''), 1800);
   }
 
   function openSportsEditor() {
     sportsDraft = [...userProfile.sports];
     skillsDraft = Object.fromEntries(userProfile.sports.map((sport, index) => [sport, userProfile.skills[index] ?? 'Intermediate']));
+    sportsEditorError = '';
     profileSheet = 'sports';
   }
 
@@ -1712,35 +1851,30 @@
   }
 
   async function saveSportsEditor() {
-    if (sportsSaving) return;
-    sportsSaving = true;
-    if (!session) { sportsSaving = false; return; }
-
+    if (sportsSaving || !session) return;
     if (!sportsDraft.length) {
-      notice = 'Choose at least one sport';
-      setTimeout(() => (notice = ''), 1800);
-      sportsSaving = false;
+      sportsEditorError = 'Choose at least one sport.';
       return;
     }
 
-    const { error } = await saveProfileSports(session.id, sportsDraft, skillsDraft);
+    sportsSaving = true;
+    sportsEditorError = '';
+    try {
+      const { error } = await saveProfileSports(session.id, sportsDraft, skillsDraft);
+      if (error) throw error;
 
-    if (error) {
-      notice = userFacingError(error, 'Could not save that change.');
-      setTimeout(() => (notice = ''), 2200);
+      userProfile = {
+        ...userProfile,
+        sports: [...sportsDraft],
+        skills: sportsDraft.map((sport) => skillsDraft[sport] ?? 'Intermediate')
+      };
+      profileSheet = null;
+      showNotice('Sports updated');
+    } catch (saveError) {
+      sportsEditorError = userFacingError(saveError, 'Could not save your sports and skill levels. Please try again.');
+    } finally {
       sportsSaving = false;
-      return;
     }
-
-    userProfile = {
-      ...userProfile,
-      sports: sportsDraft,
-      skills: sportsDraft.map((sport) => skillsDraft[sport] ?? 'Intermediate')
-    };
-    profileSheet = null;
-    sportsSaving = false;
-    notice = 'Sports updated';
-    setTimeout(() => (notice = ''), 1800);
   }
 
   function openAccountSettings() {
@@ -1758,39 +1892,25 @@
   }
 
   async function saveSettings() {
-    if (settingsSaving) return;
+    if (settingsSaving || !session) return;
     settingsSaving = true;
-    if (!session) { settingsSaving = false; return; }
+    try {
+      const { error } = await saveUserSettings({
+        eventNotifications: settingsDraft.eventNotifications,
+        friendNotifications: settingsDraft.friendNotifications,
+        ratingNotifications: settingsDraft.ratingNotifications,
+        showContact: settingsDraft.showContact
+      });
+      if (error) throw error;
 
-    const { error } = await saveNotificationPreferences(session.id, {
-      eventNotifications: settingsDraft.eventNotifications,
-      friendNotifications: settingsDraft.friendNotifications,
-      ratingNotifications: settingsDraft.ratingNotifications
-    });
-
-    if (error) {
-      notice = userFacingError(error, 'Could not save that change.');
-      setTimeout(() => (notice = ''), 2200);
+      userProfile = { ...userProfile, settings: { ...settingsDraft } };
+      profileSheet = null;
+      showNotice('Settings saved');
+    } catch (saveError) {
+      showNotice(userFacingError(saveError, 'Could not save your settings.'));
+    } finally {
       settingsSaving = false;
-      return;
     }
-
-    const contactError = await saveAccountProfile(session.id, {
-      contactVisible: settingsDraft.showContact
-    });
-
-    if (contactError) {
-      notice = userFacingError(contactError, 'Could not save your account settings.');
-      setTimeout(() => (notice = ''), 2200);
-      settingsSaving = false;
-      return;
-    }
-
-    userProfile = { ...userProfile, settings: { ...settingsDraft } };
-    profileSheet = null;
-    settingsSaving = false;
-    notice = 'Settings saved';
-    setTimeout(() => (notice = ''), 1800);
   }
 
   function openPasswordSheet() {
@@ -1812,14 +1932,12 @@
     const confirmPassword = passwordDraft.confirmPassword;
 
     if (password.length < 6) {
-      notice = 'Password must be at least 6 characters';
-      setTimeout(() => (notice = ''), 2200);
+      showNotice('Password must be at least 6 characters');
       return;
     }
 
     if (password !== confirmPassword) {
-      notice = 'Passwords do not match';
-      setTimeout(() => (notice = ''), 2200);
+      showNotice('Passwords do not match');
       return;
     }
 
@@ -1829,37 +1947,32 @@
       if (error) throw error;
       passwordSheetOpen = false;
       passwordDraft = { password: '', confirmPassword: '' };
-      notice = 'Password updated';
+      showNotice('Password updated');
     } catch (passwordError) {
-      notice = userFacingError(passwordError, 'Could not update your password.');
+      showNotice(userFacingError(passwordError, 'Could not update your password.'));
     } finally {
       passwordSaving = false;
     }
-    setTimeout(() => (notice = ''), 2200);
   }
 
   async function saveAccountSettings() {
-    if (accountSaving) return;
+    if (accountSaving || !session) return;
     accountSaving = true;
-    if (!session) { accountSaving = false; return; }
+    try {
+      const contactVisible = userProfile.settings?.showContact ?? false;
+      const error = await saveAccountProfile(session.id, {
+        phone: userProfile.phone ?? '',
+        contactVisible
+      });
+      if (error) throw error;
 
-    const contactVisible = userProfile.settings?.showContact ?? false;
-    const error = await saveAccountProfile(session.id, {
-      phone: userProfile.phone ?? '',
-      contactVisible
-    });
-
-    if (error) {
-      notice = userFacingError(error, 'Could not save that change.');
-      setTimeout(() => (notice = ''), 2200);
+      profileSheet = null;
+      showNotice('Account saved');
+    } catch (saveError) {
+      showNotice(userFacingError(saveError, 'Could not save that change.'));
+    } finally {
       accountSaving = false;
-      return;
     }
-
-    profileSheet = null;
-    accountSaving = false;
-    notice = 'Account saved';
-    setTimeout(() => (notice = ''), 1800);
   }
 
 </script>
@@ -1882,29 +1995,19 @@
         </div>
         <div class="hero-copy"><h1>{selectedEvent.title}</h1>{#if selectedEvent.description}<p>{selectedEvent.description}</p>{/if}</div>
       </div>
-      <div class="detail-grid">
-        <div><Icon name="calendar" size={19}/><span>{selectedEvent.date}</span></div>
-        <div><Icon name="map" size={19}/><span>{selectedEvent.location}</span></div>
-        {#if selectedEvent.eventType === 'esports'}
-          {#if selectedEvent.platform}<div><Icon name="monitor" size={19}/><span>{selectedEvent.platform}</span></div>{/if}
-          {#if selectedEvent.gameMode}<div><Icon name="gamepad" size={19}/><span>{selectedEvent.gameMode}</span></div>{/if}
-        {/if}
-      </div>
-      <section class="panel players-panel">
-        <div class="panel-head"><div><h2>Players</h2><span class="panel-subtitle">Who's in the game</span></div><strong>{selectedEvent?.members ?? 0}/{selectedEvent?.capacity ?? 0}</strong></div>
-        <div class="big-progress"><span style={`width:${Math.round(((selectedEvent?.members ?? 0) / Math.max(selectedEvent?.capacity ?? 1, 1)) * 100)}%`}></span></div>
-        <div class="player-count-line"><span>{Math.max((selectedEvent?.capacity ?? 0) - (selectedEvent?.members ?? 0), 0)} spots left</span><span>{Math.round(((selectedEvent?.members ?? 0) / Math.max(selectedEvent?.capacity ?? 1, 1)) * 100)}% filled</span></div>
-        <div class="avatars">{#each selectedEvent.memberProfiles ?? [] as player}<button type="button" class="profile-avatar-chip {avatarColorForId(player.id)}" aria-label={`Open ${player.name}'s profile`} onclick={() => openPlayerProfile(player.id, player)}>{player.name[0]?.toUpperCase() ?? '?'}</button>{/each}{#if (selectedEvent?.memberProfiles?.length ?? 0) < (selectedEvent?.members ?? 0)}<span class="empty">+</span>{/if}</div>
-      </section>
-      <div class="host-line"><span>Hosted by</span><button type="button" class="profile-link" onclick={() => openPlayerProfile(selectedEvent?.hostId ?? '', { name: selectedEvent?.host })}>{selectedEvent?.host ?? ''}</button></div>
+      <EventDetailsGrid event={selectedEvent} />
+      {#if selectedEvent.visibility !== 'Private' || selectedEvent.isMember}
+        <EventPlayersPanel event={selectedEvent} {avatarColorForId} onOpenPlayer={openPlayerProfile} />
+      {/if}
+      <div class="host-line"><span>Hosted by</span>{#if selectedEvent.visibility === 'Private' && !selectedEvent.isMember}<span>Private host</span>{:else}<button type="button" class="profile-link" onclick={() => openPlayerProfile(selectedEvent?.hostId ?? '', { name: selectedEvent?.host })}>{selectedEvent?.host ?? ''}</button>{/if}</div>
 
       {#if isEventHostById(selectedEvent.hostId ?? '')}
         <section class="host-actions">
           {#if selectedEvent.status === 'completed'}
             {#if !selectedEvent.ratingsSubmitted}<button class="primary" onclick={openSelectedEventRating}>Rate players</button>{/if}
           {:else if selectedEvent.status === 'upcoming' || selectedEvent.status === 'full'}
-            <button class="secondary" disabled={Boolean(eventAction)} onclick={() => startEdit(selectedEvent)}><Icon name="edit" size={17}/>Edit event</button>
-            <button class="secondary" disabled={Boolean(eventAction)} onclick={finishSelectedEvent}><Icon name="check" size={17}/>{eventAction === 'finish' ? 'Finishing…' : 'Finish event'}</button>
+            {#if eventStartTimestamp(selectedEvent) > Date.now()}<button class="secondary" disabled={Boolean(eventAction)} onclick={() => startEdit(selectedEvent)}><Icon name="edit" size={17}/>Edit event</button>{/if}
+            <button class="secondary" disabled={Boolean(eventAction) || eventStartTimestamp(selectedEvent) > Date.now()} onclick={finishSelectedEvent}><Icon name="check" size={17}/>{eventAction === 'finish' ? 'Finishing…' : eventStartTimestamp(selectedEvent) > Date.now() ? 'Available at start time' : 'Finish event'}</button>
             <button class="danger" disabled={Boolean(eventAction)} onclick={cancelSelectedEvent}><Icon name="close" size={17}/>{eventAction === 'cancel' ? 'Cancelling…' : 'Cancel event'}</button>
           {/if}
           {#if (selectedEvent.pendingRequests ?? 0) > 0}
@@ -1922,14 +2025,18 @@
           {/if}
         </section>
       {:else if selectedEvent.status === 'completed'}
-        <div class="state-message">This event is completed.</div>
+        {#if selectedEvent.isMember}
+          <section class="host-actions"><button class="primary" onclick={openSelectedEventRating}>Rate players</button></section>
+        {:else}
+          <div class="state-message">This event is completed.</div>
+        {/if}
       {:else if selectedEvent.status === 'cancelled'}
         <div class="state-message">This event is cancelled.</div>
       {:else if selectedEvent.isMember}
-        <div class="state-message">You are in this game.</div>
-        <div class="join-actions"><button class="secondary" disabled={Boolean(eventAction)} onclick={leaveSelectedEvent}>{eventAction === 'leave' ? 'Leaving…' : 'Leave game'}</button></div>
-      {:else if selectedEvent.visibility === 'Private' && (selectedEvent.pendingRequests ?? 0) > 0}
-        <div class="state-message">Your join request is pending.</div>
+        <div class="state-message">{eventStartTimestamp(selectedEvent) <= Date.now() ? 'The start time has passed. Stay connected until the host finishes the event.' : 'You are in this game.'}</div>
+        {#if eventStartTimestamp(selectedEvent) > Date.now()}<div class="join-actions"><button class="secondary" disabled={Boolean(eventAction)} onclick={leaveSelectedEvent}>{eventAction === 'leave' ? 'Leaving…' : 'Leave game'}</button></div>{/if}
+      {:else if selectedEvent.visibility === 'Private' && selectedEvent.hasRequested}
+        <div class="join-actions"><button type="button" class="primary request-pending-button" disabled>Requested</button></div>
       {:else if selectedEvent.members >= selectedEvent.capacity}
         <div class="state-message">This game is full.</div>
       {:else if eventStartTimestamp(selectedEvent) <= Date.now()}
@@ -2056,10 +2163,10 @@
         </div>
       {/if}
       {#if filteredIncomingRequests.length > 0}
-        <section class="panel compact-panel"><div class="panel-head"><h2>Friend requests</h2><span class="request-count">{filteredIncomingRequests.length} waiting</span></div>{#each filteredIncomingRequests as request}<div class="request-row"><button type="button" class="request-person" onclick={() => openPlayerProfile(request.senderId, request)}><span class="friend-avatar {avatarColorForId(request.senderId)}">{(request.name?.[0] ?? request.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{request.name}</strong><small>{request.handle} · {request.sports}</small></span></button><button class="request-action accept" disabled={friendAction === `accept:${request.id}`} onclick={() => acceptFriendRequest(request)}>{friendAction === `accept:${request.id}` ? 'Accepting…' : 'Accept'}</button><button class="request-action decline" disabled={friendAction === `decline:${request.id}`} onclick={() => declineFriendRequest(request)}>{friendAction === `decline:${request.id}` ? 'Declining…' : 'Decline'}</button></div>{/each}</section>
+        <section class="panel compact-panel"><div class="panel-head"><h2>Friend requests</h2><span class="request-count">{filteredIncomingRequests.length} waiting</span></div>{#each filteredIncomingRequests as request}<div class="request-row"><button type="button" class="request-person" onclick={() => openPlayerProfile(request.senderId, request)}><span class="friend-avatar {avatarColorForId(request.senderId)}">{(request.name?.[0] ?? request.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{request.name}</strong><small>{request.handle} · {request.sports}</small></span></button><button class="request-action accept" disabled={Boolean(friendAction)} onclick={() => acceptFriendRequest(request)}>{friendAction === `accept:${request.id}` ? 'Accepting…' : 'Accept'}</button><button class="request-action decline" disabled={Boolean(friendAction)} onclick={() => declineFriendRequest(request)}>{friendAction === `decline:${request.id}` ? 'Declining…' : 'Decline'}</button></div>{/each}</section>
       {/if}
-      <section class="friends-section"><div class="section-head"><h2>{searchQuery ? 'Search results' : 'Find people'}</h2><span>{displayedPeople.length} results</span></div><div class="list">{#each displayedPeople as candidate}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(candidate.id, candidate)}><span class="friend-avatar {avatarColorForId(candidate.id)}">{(candidate.name?.[0] ?? candidate.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{candidate.name}</strong><small>{candidate.handle} · {candidate.sports}</small></span></button>{#if searchQuery}{#if candidate.relation === 'none'}<button class="tiny" disabled={friendAction === `send:${candidate.id}`} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{:else if candidate.relation === 'outgoing'}<button class="tiny" disabled>Pending</button>{:else if candidate.relation === 'incoming' && candidate.requestId}<button class="tiny" disabled={friendAction === `accept:${candidate.requestId}`} onclick={() => acceptSearchResult(candidate)}>{friendAction === `accept:${candidate.requestId}` ? 'Accepting…' : 'Accept'}</button>{:else}<button class="tiny" disabled>Friends</button>{/if}{:else}<button class="tiny" disabled={friendAction === `send:${candidate.id}`} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{/if}</div>{/each}</div></section>
-      <section class="friends-section"><div class="section-head"><h2>Your friends</h2><span>{filteredFriends.length} friends</span></div><div class="list">{#each filteredFriends as friend}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(friend.id, friend)}><span class="friend-avatar {avatarColorForId(friend.id)}">{(friend.name?.[0] ?? friend.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{friend.name}</strong><small>{friend.handle} · {friend.sports}</small></span><span class="status">{friend.status}</span></button><button class="tiny" disabled={friendAction === `remove:${friend.id}`} onclick={() => removeFriend(friend)}>{friendAction === `remove:${friend.id}` ? 'Removing…' : 'Remove'}</button></div>{/each}</div></section>
+      <section class="friends-section"><div class="section-head"><h2>{searchQuery ? 'Search results' : 'Find people'}</h2><span>{displayedPeople.length} results</span></div><div class="list">{#each displayedPeople as candidate}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(candidate.id, candidate)}><span class="friend-avatar {avatarColorForId(candidate.id)}">{(candidate.name?.[0] ?? candidate.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{candidate.name}</strong><small>{candidate.handle} · {candidate.sports}</small></span></button>{#if searchQuery}{#if candidate.relation === 'none'}<button class="tiny" disabled={Boolean(friendAction)} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{:else if candidate.relation === 'outgoing'}<button class="tiny" disabled>Pending</button>{:else if candidate.relation === 'incoming' && candidate.requestId}<button class="tiny" disabled={Boolean(friendAction)} onclick={() => acceptSearchResult(candidate)}>{friendAction === `accept:${candidate.requestId}` ? 'Accepting…' : 'Accept'}</button>{:else}<button class="tiny" disabled>Friends</button>{/if}{:else}<button class="tiny" disabled={Boolean(friendAction)} onclick={() => sendFriendRequest(candidate)}>{friendAction === `send:${candidate.id}` ? 'Sending…' : 'Add'}</button>{/if}</div>{/each}</div></section>
+      <section class="friends-section"><div class="section-head"><h2>Your friends</h2><span>{filteredFriends.length} friends</span></div><div class="list">{#each filteredFriends as friend}<div class="friend-row"><button class="friend-main" onclick={() => openPlayerProfile(friend.id, friend)}><span class="friend-avatar {avatarColorForId(friend.id)}">{(friend.name?.[0] ?? friend.handle?.replace(/^@+/, '')?.[0] ?? '?').toUpperCase()}</span><span class="friend-copy"><strong>{friend.name}</strong><small>{friend.handle} · {friend.sports}</small></span><span class="status">{friend.status}</span></button><button class="tiny" disabled={Boolean(friendAction)} onclick={() => removeFriend(friend)}>{friendAction === `remove:${friend.id}` ? 'Removing…' : 'Remove'}</button></div>{/each}</div></section>
     </main>
   {:else if active === 'stats'}
     <main class="screen" transition:fade={{ duration: 170 }}>
@@ -2220,8 +2327,8 @@
       <section class="sheet chat-sheet selection-sheet" aria-label="Game chats" transition:fly={{ y: 34, duration: 260, opacity: 0.98 }}>
         {#if chatEvent}
           <div class="chat-surface-inner" transition:slide={{ duration: 180 }}>
-          <div class="sheet-head chat-detail-head"><button class="back chat-back" aria-label="Back to chats" onclick={() => { chatUnsubscribe?.(); chatUnsubscribe = null; if (chatPollTimer !== null) { clearInterval(chatPollTimer); chatPollTimer = null; } chatEvent = null; chatDraft = ''; chatLoading = false; }}><Icon name="back" size={20}/></button><div><p class="eyebrow">GAME CHAT</p><h2>{chatEvent.title}</h2></div><button class="round" aria-label="Close" onclick={closeChat}><Icon name="close" size={20}/></button></div>
-          <div class="chat-meta"><span>{chatEvent.members} players</span><span>Game group</span></div>
+          <div class="sheet-head chat-detail-head"><button class="back chat-back" aria-label="Back to chats" onclick={backToChatHub}><Icon name="back" size={20}/></button><div><p class="eyebrow">GAME CHAT</p><h2>{chatEvent.title}</h2></div><button class="round" aria-label="Close" onclick={closeChat}><Icon name="close" size={20}/></button></div>
+          <div class="chat-meta"><span>{chatEvent.members} players</span><span>Game group</span>{#if chatRealtimeUnavailable}<span role="status">Live updates paused · reconnecting</span>{/if}</div>
           <div class="chat-list chat-selection-list">
             {#if chatLoadError}
               <div class="state-message load-state error-state">
@@ -2245,6 +2352,7 @@
           {#if !chatLoadError}<form class="chat-composer" onsubmit={(event) => { event.preventDefault(); sendChatMessage(); }}>
             <input bind:value={chatDraft} aria-label="Message" placeholder="Message the group…" onpointerup={focusFormControl} ontouchend={focusFormControl} />
             <button type="submit" class="chat-send" aria-label="Send message" disabled={chatSending || !chatDraft.trim()}><Icon name="send" size={18}/></button>
+            {#if chatSendError}<p class="editor-error chat-send-error" role="alert">{chatSendError}</p>{/if}
           </form>{/if}
           </div>
         {:else}
@@ -2267,9 +2375,9 @@
 
   {#if showRating && ratingEvent}
     <div class="scrim" transition:fade={{ duration: 190 }}>
-      <button class="scrim-backdrop" type="button" aria-label="Close rating" onclick={() => showRating = false}></button>
+      <button class="scrim-backdrop" type="button" aria-label="Close rating" disabled={ratingSubmitting} onclick={closeRatingSheet}></button>
       <section class="sheet rating-sheet" aria-label="Rate players" transition:fly={{ y: 34, duration: 260, opacity: 0.98 }}>
-        <div class="sheet-head"><div><p class="eyebrow">POST-GAME</p><h2>Rate players</h2></div><button class="round" aria-label="Close" onclick={() => showRating = false}><Icon name="close" size={20}/></button></div>
+        <div class="sheet-head"><div><p class="eyebrow">POST-GAME</p><h2>Rate players</h2></div><button class="round" aria-label="Close" disabled={ratingSubmitting} onclick={closeRatingSheet}><Icon name="close" size={20}/></button></div>
         <div class="rating-summary">
           <div class="rating-summary-copy">
             <strong>How did everyone do?</strong>
@@ -2352,6 +2460,7 @@
         <div class="form-field"><label for="profile-name">Name</label><input id="profile-name" bind:value={profileDraft.name} placeholder="Your name" onpointerup={focusFormControl} ontouchend={focusFormControl} /></div>
         <div class="form-field"><label for="profile-handle">Handle</label><input id="profile-handle" bind:value={profileDraft.handle} placeholder="@yourhandle" onpointerup={focusFormControl} ontouchend={focusFormControl} /></div>
         <div class="form-field"><label for="profile-bio">Bio</label><textarea id="profile-bio" bind:value={profileDraft.bio} rows="3" placeholder="A short intro" onpointerup={focusFormControl} ontouchend={focusFormControl}></textarea></div>
+        {#if profileEditorError}<p class="editor-error" role="alert">{profileEditorError}</p>{/if}
         <button class="primary" disabled={profileSaving} onclick={saveProfileEditor}>{profileSaving ? 'Saving…' : 'Save profile'}</button>
       </section>
     </div>
@@ -2388,6 +2497,7 @@
             {/each}
           </div>
         {/if}
+        {#if sportsEditorError}<p class="editor-error" role="alert">{sportsEditorError}</p>{/if}
         <button class="primary" disabled={sportsSaving} onclick={saveSportsEditor}>{sportsSaving ? 'Saving…' : 'Save sports'}</button>
       </section>
     </div>
@@ -2409,7 +2519,7 @@
             {#each sortedEvents as event (event.id)}
               <button type="button" class="event-list-row" onclick={() => openEvent(event)}>
                 <span class="event-list-accent {event.color}"></span>
-                <span class="event-list-copy"><strong>{event.title}</strong><small>{event.eventType === 'esports' ? `Esports · ${event.sport}` : event.sport} · {event.date}</small><span>{event.members}/{event.capacity} players · {event.location}</span></span>
+                <span class="event-list-copy"><strong>{event.title}</strong><small>{event.eventType === 'esports' ? `Esports · ${event.sport}` : event.sport} · {event.date}</small><span>{event.members}/{event.capacity} players{event.visibility === 'Private' && !event.isMember ? '' : ` · ${event.location}`}</span></span>
                 <span class="event-list-side"><span class="event-status-mini {event.status ?? 'upcoming'}">{event.status === 'completed' ? 'Completed' : event.status === 'cancelled' ? 'Cancelled' : event.status === 'full' ? 'Full' : 'Upcoming'}</span><Icon name="chevron" size={17}/></span>
               </button>
             {/each}
@@ -2604,18 +2714,21 @@
       </section>
     </div>
   {/if}
-  {#if notice}<div class="toast" transition:fly={{ y: 10, duration: 150, opacity: 0 }}>{notice}</div>{/if}
+  <footer class="site-footer">built and maintained by Sanjay Shashibushan</footer>
+  {#if notice}<div class="toast" in:fly={{ y: 24, duration: 360, opacity: 0, easing: backOut }} out:fly={{ y: 28, duration: 220, opacity: 0, easing: cubicIn }}>{notice}</div>{/if}
 </div>
 {/if}
 
 <style>
   .auth-loading{min-height:100vh;background:#fbfbfb;display:grid;place-items:center;color:#777;font:800 12px Quicksand,sans-serif}
-  :global(*){box-sizing:border-box}:global(html,body){margin:0;min-height:100%;background:#161616;color:#171717;font-family:Nunito,Arial,sans-serif}:global(a),:global(a:visited){color:#171717;text-decoration:none}:global(button),:global(input),:global(select),:global(textarea){font:inherit;color:#171717}:global(button){-webkit-text-fill-color:#171717}:global(button.primary),:global(.toast){color:#fff;-webkit-text-fill-color:#fff} :global(input),:global(textarea),:global(select){font-size:16px !important;line-height:1.2;-webkit-text-size-adjust:100%}:global(button){cursor:pointer}:global(button:disabled){cursor:default;opacity:.62}:global(button:disabled:active){transform:none !important}.primary:disabled,.secondary:disabled,.danger:disabled,.accept:disabled,.decline:disabled,.tiny:disabled{box-shadow:-2px 3px 0 #ddd}.chat-send:disabled{opacity:.55}.app-shell{min-height:100vh;width:min(100%,430px);margin:0 auto;background:#fbfbfb;position:relative}.screen{min-height:100vh;padding:25px 16px calc(130px + env(safe-area-inset-bottom))}.toolbar,.page-head,.profile-head,.sheet-head,.panel-head{display:flex;align-items:center;justify-content:space-between}.toolbar{margin-bottom:22px;gap:16px}.eyebrow{margin:0 0 5px;font:800 12px Quicksand,sans-serif;letter-spacing:.09em}.toolbar h1,.page-head h1{margin:0;font:900 28px/1.05 Nunito,sans-serif;letter-spacing:-.025em}.avatar,.round{border:2px solid #171717;background:#ffe5d4;border-radius:50%;width:44px;height:44px;display:grid;place-items:center;font-weight:900;box-shadow:-4px 5px 0 #a1a2a4}.round{background:#fff;box-shadow:none;width:42px;height:42px}.filters{display:flex;gap:8px;overflow:auto;scrollbar-width:none;margin-bottom:28px;padding:3px 2px 8px}.filters::-webkit-scrollbar{display:none}.filters button,.pill{border:2px solid #171717;background:#fff;border-radius:999px;padding:9px 14px;font:700 13px Quicksand,sans-serif;letter-spacing:.005em;word-spacing:.02em;white-space:nowrap}.filters .chosen{background:#e9e5ff;box-shadow:-3px 4px 0 #a1a2a4}.home-filters{position:relative;overflow:visible}.home-filters .esports-filter-button{background:#fbf1f3;border-color:#d98a94!important;color:#a94d55}.home-filters .esports-filter-button.chosen{background:#f8dfe3;box-shadow:-3px 4px 0 #a1a2a4}
+  :global(*){box-sizing:border-box}:global(html,body){margin:0;min-height:100%;background:#161616;color:#171717;font-family:Nunito,Arial,sans-serif}:global(a),:global(a:visited){color:#171717;text-decoration:none}:global(button),:global(input),:global(select),:global(textarea){font:inherit;color:#171717}:global(button){-webkit-text-fill-color:currentColor}:global(button.primary),:global(.toast){color:#fff;-webkit-text-fill-color:#fff} :global(input),:global(textarea),:global(select){font-size:16px !important;line-height:1.2;-webkit-text-size-adjust:100%}:global(button){cursor:pointer}:global(button:disabled){cursor:default;opacity:1;filter:saturate(.68)}:global(button:disabled:active){transform:none !important}.primary:disabled,.secondary:disabled,.danger:disabled,.accept:disabled,.decline:disabled,.tiny:disabled{box-shadow:-2px 3px 0 #ddd}.chat-send:disabled{opacity:1}.app-shell{min-height:100vh;width:min(100%,430px);margin:0 auto;background:#fbfbfb;position:relative}.screen{min-height:100vh;padding:25px 16px calc(130px + env(safe-area-inset-bottom))}.toolbar,.page-head,.profile-head,.sheet-head,.panel-head{display:flex;align-items:center;justify-content:space-between}.toolbar{margin-bottom:22px;gap:16px}.eyebrow{margin:0 0 5px;font:800 12px Quicksand,sans-serif;letter-spacing:.09em}.toolbar h1,.page-head h1{margin:0;font:900 28px/1.05 Nunito,sans-serif;letter-spacing:-.025em}.avatar,.round{border:2px solid #171717;background:#ffe5d4;border-radius:50%;width:44px;height:44px;display:grid;place-items:center;font-weight:900;box-shadow:-4px 5px 0 #a1a2a4}.round{background:#fff;box-shadow:none;width:42px;height:42px}.filters{display:flex;gap:8px;overflow:auto;scrollbar-width:none;margin-bottom:28px;padding:3px 2px 8px}.filters::-webkit-scrollbar{display:none}.filters button,.pill{border:2px solid #171717;background:#fff;border-radius:999px;padding:9px 14px;font:700 13px Quicksand,sans-serif;letter-spacing:.005em;word-spacing:.02em;white-space:nowrap}.filters .chosen{background:#e9e5ff;box-shadow:-3px 4px 0 #a1a2a4}.home-filters{position:relative;overflow:visible}.home-filters .esports-filter-button{background:#fbf1f3;border-color:#d98a94!important;color:#a94d55}.home-filters .esports-filter-button.chosen{background:#f8dfe3;box-shadow:-3px 4px 0 #a1a2a4}
 .home-filters .sports-filter-button{background:#f7f5ff;border-color:#b7afe8!important;color:#675db5}
-.home-filters .sports-filter-button.chosen{background:#e9e5ff;box-shadow:-3px 4px 0 #a1a2a4}.home-filter-popover{margin:-18px 0 20px;border:2px solid #171717;border-radius:19px;background:#fff;box-shadow:-5px 6px 0 #a1a2a4;position:relative;z-index:30;overflow:hidden;display:grid;gap:7px;padding:10px}.home-filter-popover button.home-filter-option{min-height:46px;border:1.5px solid #171717;border-radius:13px;background:#fbfbfb;padding:9px 11px;display:flex;align-items:center;justify-content:space-between;text-align:left;font:900 12px Nunito;box-shadow:-2px 3px 0 #e1e1e1}.home-filter-popover button.home-filter-option:active{transform:translate(-1px,1px);box-shadow:-1px 2px 0 #e1e1e1}.home-filter-popover button.home-filter-option.sports-option.selected-choice{background:#e9e5ff;box-shadow:-2px 3px 0 #a1a2a4}.home-filter-popover button.home-filter-option.esports-option.selected-choice{background:#f8dfe3;color:#a94d55;box-shadow:-2px 3px 0 #a1a2a4}.home-filter-popover button.home-filter-option.esports-option .choice-check{color:#a94d55}.home-filter-empty{padding:10px 11px;color:#777;font:700 11px Quicksand;text-align:center}.section-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:15px}.section-head h2,.panel h2{margin:0;font:900 21px Nunito,sans-serif}.section-head span,.muted{color:#777;font:700 12px Quicksand,sans-serif}.discovery-head{align-items:center;gap:10px}.discovery-head>div:first-child{display:grid;gap:3px;min-width:0}.discovery-sort{display:flex;flex:0 0 auto;border:1.5px solid #171717;border-radius:12px;background:#fff;padding:2px;box-shadow:-2px 3px 0 #ddd}.discovery-sort button{border:0;border-radius:9px;background:transparent;padding:6px 8px;font:800 9px Quicksand;color:#777}.discovery-sort button.chosen{background:#e9e5ff;color:#171717}.event-search{height:48px;border:2px solid #171717;border-radius:17px;background:#fff;display:flex;align-items:center;gap:9px;padding:0 9px 0 13px;box-shadow:-3px 4px 0 #ddd;margin:-2px 0 18px}.event-search input{border:0;outline:0;background:transparent;width:100%;min-width:0;font:700 14px Quicksand,sans-serif}.event-search-clear{width:32px;height:32px;border:1.5px solid #171717;border-radius:10px;background:#f8f8f8;display:grid;place-items:center;flex:0 0 auto}.home-empty-state{display:grid;justify-items:center;gap:7px;padding:20px 16px}.home-empty-state strong{font:900 15px Nunito}.home-empty-state span{max-width:285px;color:#777;font:700 11px/1.4 Quicksand;text-align:center}.home-empty-state .tiny{margin-top:4px;background:#e9e5ff}.event-discovery-item{min-width:0}.feed{display:grid;gap:18px}.create{position:fixed;right:max(24px,calc(50% - 191px));bottom:calc(103px + env(safe-area-inset-bottom));width:54px;height:54px;border:2px solid #171717;border-radius:18px;background:#dcecff;display:grid;place-items:center;box-shadow:-5px 6px 0 #a1a2a4;z-index:71}.chat-fab{position:fixed;left:max(24px,calc(50% - 191px));bottom:calc(103px + env(safe-area-inset-bottom));width:54px;height:54px;border:2px solid #171717;border-radius:18px;background:#e9e5ff;display:grid;place-items:center;box-shadow:5px 6px 0 #a1a2a4;z-index:71;touch-action:manipulation;-webkit-tap-highlight-color:transparent}.page-head{margin-bottom:20px}.search{height:48px;border:2px solid #171717;border-radius:17px;background:#fff;display:flex;align-items:center;gap:9px;padding:0 13px;box-shadow:-3px 4px 0 #ddd;margin-bottom:15px}.search input{border:0;outline:0;background:transparent;width:100%;font:700 14px Quicksand,sans-serif}.request{border:2px solid #171717;border-radius:20px;background:#f1edff;padding:13px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;box-shadow:-4px 5px 0 #a1a2a4}.request div{display:grid;gap:3px}.request span{font:700 11px Quicksand;color:#777}.tiny{border:1.5px solid #171717;border-radius:999px;background:#fff;padding:7px 11px;font:800 11px Quicksand}.list{display:grid;gap:9px}.compact-panel{padding:15px;margin-bottom:22px}.compact-panel .panel-head{margin-bottom:10px}.request-count{font:800 11px Quicksand;color:#777}.request-row{display:grid;grid-template-columns:44px minmax(0,1fr) auto auto;align-items:center;gap:7px;padding:9px 0;border-top:1px solid #ddd}.request-row:first-of-type{border-top:0}.request-action{border:1.5px solid #171717;border-radius:999px;padding:7px 9px;font:800 10px Quicksand}.request-action.accept{background:#ddf3e7}.request-action.decline{background:#fff}.friends-section{margin-bottom:24px}.friend-main{border:0;background:transparent;padding:0;display:flex;align-items:center;text-align:left;gap:11px;min-width:0;flex:1}.friend-row{border:0;background:#fff;border-bottom:1px solid #ddd;padding:9px 2px;display:flex;align-items:center;text-align:left;gap:9px}.friend-profile-sheet{text-align:left}.friend-profile-card{display:grid;justify-items:center;gap:7px;padding:10px 0 20px}.friend-profile-card .profile-avatar{width:78px;height:78px;flex-basis:78px;font-size:25px}.friend-avatar,.profile-avatar{width:44px;height:44px;border:2px solid #171717;border-radius:50%;display:grid;place-items:center;font-weight:900;flex:0 0 44px}.friend-avatar.blue{background:#dcecff}.friend-avatar.peach{background:#ffe5d4}.friend-avatar.lavender{background:#e9e5ff}.friend-avatar.mint{background:#ddf3e7}.profile-avatar.blue{background:#dcecff}.profile-avatar.peach{background:#ffe5d4}.profile-avatar.lavender{background:#e9e5ff}.profile-avatar.mint{background:#ddf3e7}.friend-copy{display:grid;gap:2px;flex:1}.friend-copy strong{font:900 15px Nunito}.friend-copy small,.status{font:700 11px Quicksand;color:#777}.status{font-size:10px}.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin:24px 0 20px}.stat-grid div{background:#fff;border:2px solid #171717;border-radius:20px;padding:17px;box-shadow:-4px 5px 0 #a1a2a4;display:grid;gap:3px}.stat-grid strong{font:900 27px Nunito}.stat-grid span{font:700 11px Quicksand;color:#777}.stats-hero{margin:22px 0 14px;border:2px solid #171717;border-radius:24px;background:#e9e5ff;padding:17px;box-shadow:-5px 6px 0 #a1a2a4}.stats-hero-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.stats-hero-top>div:first-child{display:grid;gap:2px;min-width:0}.stats-hero-top .eyebrow{margin:0 0 3px;font-size:9px}.stats-hero-top strong{font:900 39px/1 Nunito;letter-spacing:-.035em}.stats-hero-top span{color:#666;font:700 10px Quicksand}.stats-hero-badge{display:flex;align-items:center;gap:6px;border:1.5px solid #171717;border-radius:999px;background:#fff;padding:7px 9px;white-space:nowrap;font:900 10px Quicksand}.stats-hero-meta{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:15px}.stats-hero-meta div{border:1.5px solid #171717;border-radius:15px;background:rgba(255,255,255,.65);padding:10px 11px;display:grid;gap:2px}.stats-hero-meta strong{font:900 18px Nunito}.stats-hero-meta span{font:700 9px Quicksand;color:#777}.panel{background:#fff;border:2px solid #171717;border-radius:22px;padding:17px;box-shadow:-5px 6px 0 #a1a2a4;margin-bottom:18px}.stats-sport-panel .panel-head{align-items:flex-start}.stats-sport-panel .panel-head>div{display:grid;gap:2px}.stats-sport-panel .panel-head strong{min-width:28px;height:28px;display:grid;place-items:center;border:1.5px solid #171717;border-radius:10px;background:#f8f8f8}.stats-bars{display:grid;gap:2px}.stats-bars .bar-row{padding:5px 0}.stats-bars .bar-row>div:first-child{font-size:11px}.stats-bars .bar{height:10px;background:#f0f0f0}.stats-bars .bar span{background:#7e9fe7}.players-panel .panel-head>div{display:grid;gap:3px}.panel-subtitle{font:700 9px Quicksand;color:#888}.players-panel .panel-head strong{font-size:14px}.player-count-line{display:flex;justify-content:space-between;gap:10px;margin-top:6px;color:#888;font:700 9px Quicksand}.players-panel .avatars{margin-top:14px;padding-left:2px}.panel-head{margin-bottom:16px}.panel-head strong{font:900 13px Quicksand}.big-progress,.bar{height:9px;background:#eee;border:1.5px solid #171717;border-radius:99px;overflow:hidden}.big-progress span,.bar span{display:block;height:100%;background:#7e9fe7;border-radius:99px}.avatars{display:flex;margin-top:15px}.avatars span{width:31px;height:31px;border:2px solid #171717;border-radius:50%;background:#ffe5d4;display:grid;place-items:center;font:800 10px Quicksand;margin-right:-5px}.avatars .empty{background:#fff}.bar-row{margin-top:14px}.bar-row>div:first-child{display:flex;justify-content:space-between;font:700 12px Quicksand;margin-bottom:5px}.profile-head{justify-content:flex-start;gap:12px}.profile-head .round{margin-left:auto}.profile-avatar{width:62px;height:62px;flex-basis:62px;background:#ffe5d4;font-size:20px}.profile-head h1{margin:0;font:900 22px Nunito}.profile-head p,.bio{margin:3px 0 0;color:#777;font:700 12px Quicksand}.bio{margin:20px 0}.sport-row{display:flex;justify-content:space-between;padding:12px 0;border-top:1px solid #ddd;font:800 13px Quicksand}.sport-row span:last-child{color:#777}.settings{display:grid;border:2px solid #171717;border-radius:20px;background:#fff;overflow:hidden;box-shadow:-4px 5px 0 #a1a2a4}.settings button{border:0;border-bottom:1px solid #ddd;background:#fff;padding:16px;text-align:left;display:flex;justify-content:space-between;align-items:center;font:800 13px Quicksand}.settings button:last-child{border-bottom:0;color:#b34a4a}.detail-screen{padding-top:20px}.back{width:43px;height:43px;border:2px solid #171717;border-radius:50%;background:#fff;display:grid;place-items:center;margin-bottom:16px}.detail-hero{border:2px solid #171717;border-radius:25px;padding:20px;box-shadow:-6px 7px 0 #a1a2a4;overflow:hidden;position:relative}.detail-hero:after{content:"";position:absolute;right:-32px;bottom:-42px;width:120px;height:120px;border:2px solid rgba(23,23,23,.09);border-radius:50%}.detail-hero.blue{background:#eef6ff}.detail-hero.peach{background:#fff0e7}.detail-hero.lavender{background:#f2efff}.detail-hero.mint{background:#e9f8f0}.detail-hero.esports{background:#f8dfe3}:global(.card.esports){background:#f8dfe3;border-color:#171717}:global(.card.esports .topline span:first-child){background:#f8dfe3;color:#a94d55}:global(.card.esports .progressbar>div){background:#df8f99}.detail-hero.esports .pill{background:#f8dfe3;color:#a94d55}.event-list-accent.esports{background:#ef9ca7}.event-status-mini.esports{background:#f8dfe3}.esports-filter-button{border-color:#d98a94!important}.hero-row{display:flex;align-items:center;justify-content:space-between;gap:10px;position:relative;z-index:1}.hero-row>div{display:flex;align-items:center;gap:8px;min-width:0}.hero-tags{min-width:0}.skill-tag{border:1.5px solid #171717;border-radius:999px;padding:5px 8px;background:rgba(255,255,255,.64);font:800 9px Quicksand;color:#5f5f5f;white-space:nowrap}.status-pill{border:1.5px solid #171717;border-radius:999px;padding:5px 8px;background:#fff;font:800 10px Quicksand}.status-pill.full{background:#ffe9bf}.status-pill.completed{background:#ddf3e7}.status-pill.cancelled{background:#ffe1e1}.hero-copy{position:relative;z-index:1}.detail-hero h1{font:900 30px/1.02 Nunito;margin:18px 0 10px;letter-spacing:-.03em;overflow-wrap:anywhere}.detail-hero p{margin:0;color:#555;font:700 13px/1.45 Quicksand}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:17px 0 16px}.detail-grid div{display:grid;grid-template-columns:22px minmax(0,1fr);align-items:center;gap:8px;min-width:0;background:#fff;border:2px solid #171717;border-radius:17px;padding:12px;font:800 11px/1.2 Quicksand;box-shadow:-2px 3px 0 #e3e3e3}.detail-grid div span{min-width:0;overflow-wrap:anywhere}.host-line{display:flex;align-items:center;gap:4px;margin:5px 3px 19px;color:#777;font:700 11px Quicksand}.primary{width:100%;border:2px solid #171717;border-radius:18px;background:#171717;color:#fff;padding:14px;font:900 14px Quicksand;box-shadow:-5px 6px 0 #a1a2a4}.join-actions{display:grid;gap:10px}.secondary,.danger{width:100%;border:2px solid #171717;border-radius:17px;background:#fff;color:#171717;padding:12px;font:900 13px Quicksand;display:flex;align-items:center;justify-content:center;gap:7px}.danger{background:#ffe7e7}.host-actions{display:grid;gap:10px}.request-box{border:2px solid #171717;border-radius:19px;background:#f1edff;padding:14px;display:grid;gap:12px;box-shadow:-4px 5px 0 #a1a2a4}.request-box>div:first-child{display:grid;gap:4px}.request-box strong{font:900 14px Nunito}.request-box span{font:700 11px Quicksand;color:#777}.request-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.accept,.decline{border:1.5px solid #171717;border-radius:13px;padding:9px;font:900 11px Quicksand;background:#ddf3e7}.decline{background:#fff}.state-message{border:2px solid #171717;border-radius:17px;background:#fff;padding:14px;text-align:center;font:800 12px Quicksand;box-shadow:-3px 4px 0 #ddd}.mock-tools{border:1.5px dashed #777;border-radius:16px;background:#f8f8f8;padding:10px 11px;display:flex;align-items:center;justify-content:space-between;gap:10px}.mock-tools>div{display:grid;gap:3px}.mock-tools span{font:700 10px/1.3 Quicksand;color:#777}.mock-tools .tiny{flex:0 0 auto}
+.home-filters .sports-filter-button.chosen{background:#e9e5ff;box-shadow:-3px 4px 0 #a1a2a4}.home-filter-popover{margin:-18px 0 20px;border:2px solid #171717;border-radius:19px;background:#fff;box-shadow:-5px 6px 0 #a1a2a4;position:relative;z-index:30;overflow:hidden;display:grid;gap:7px;padding:10px}.home-filter-popover button.home-filter-option{min-height:46px;border:1.5px solid #171717;border-radius:13px;background:#fbfbfb;padding:9px 11px;display:flex;align-items:center;justify-content:space-between;text-align:left;font:900 12px Nunito;box-shadow:-2px 3px 0 #e1e1e1}.home-filter-popover button.home-filter-option:active{transform:translate(-1px,1px);box-shadow:-1px 2px 0 #e1e1e1}.home-filter-popover button.home-filter-option.sports-option.selected-choice{background:#e9e5ff;box-shadow:-2px 3px 0 #a1a2a4}.home-filter-popover button.home-filter-option.esports-option.selected-choice{background:#f8dfe3;color:#a94d55;box-shadow:-2px 3px 0 #a1a2a4}.home-filter-popover button.home-filter-option.esports-option .choice-check{color:#a94d55}.home-filter-empty{padding:10px 11px;color:#777;font:700 11px Quicksand;text-align:center}.section-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:15px}.section-head h2,.panel h2{margin:0;font:900 21px Nunito,sans-serif}.section-head span,.muted{color:#777;font:700 12px Quicksand,sans-serif}.discovery-head{align-items:center;gap:10px}.discovery-head>div:first-child{display:grid;gap:3px;min-width:0}.discovery-sort{display:flex;flex:0 0 auto;border:1.5px solid #171717;border-radius:12px;background:#fff;padding:2px;box-shadow:-2px 3px 0 #ddd}.discovery-sort button{border:0;border-radius:9px;background:transparent;padding:6px 8px;font:800 9px Quicksand;color:#777}.discovery-sort button.chosen{background:#e9e5ff;color:#171717}.event-search{height:48px;border:2px solid #171717;border-radius:17px;background:#fff;display:flex;align-items:center;gap:9px;padding:0 9px 0 13px;box-shadow:-3px 4px 0 #ddd;margin:-2px 0 18px}.event-search input{border:0;outline:0;background:transparent;width:100%;min-width:0;font:700 14px Quicksand,sans-serif}.event-search-clear{width:32px;height:32px;border:1.5px solid #171717;border-radius:10px;background:#f8f8f8;display:grid;place-items:center;flex:0 0 auto}.home-empty-state{display:grid;justify-items:center;gap:7px;padding:20px 16px}.home-empty-state strong{font:900 15px Nunito}.home-empty-state span{max-width:285px;color:#777;font:700 11px/1.4 Quicksand;text-align:center}.home-empty-state .tiny{margin-top:4px;background:#e9e5ff}.event-discovery-item{min-width:0}.feed{display:grid;gap:18px}.create{position:fixed;right:max(24px,calc(50% - 191px));bottom:calc(103px + env(safe-area-inset-bottom));width:54px;height:54px;border:2px solid #171717;border-radius:18px;background:#dcecff;display:grid;place-items:center;box-shadow:-5px 6px 0 #a1a2a4;z-index:71}.chat-fab{position:fixed;left:max(24px,calc(50% - 191px));bottom:calc(103px + env(safe-area-inset-bottom));width:54px;height:54px;border:2px solid #171717;border-radius:18px;background:#e9e5ff;display:grid;place-items:center;box-shadow:5px 6px 0 #a1a2a4;z-index:71;touch-action:manipulation;-webkit-tap-highlight-color:transparent}.page-head{margin-bottom:20px}.search{height:48px;border:2px solid #171717;border-radius:17px;background:#fff;display:flex;align-items:center;gap:9px;padding:0 13px;box-shadow:-3px 4px 0 #ddd;margin-bottom:15px}.search input{border:0;outline:0;background:transparent;width:100%;font:700 14px Quicksand,sans-serif}.request{border:2px solid #171717;border-radius:20px;background:#f1edff;padding:13px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;box-shadow:-4px 5px 0 #a1a2a4}.request div{display:grid;gap:3px}.request span{font:700 11px Quicksand;color:#777}.tiny{border:1.5px solid #171717;border-radius:999px;background:#fff;padding:7px 11px;font:800 11px Quicksand}.list{display:grid;gap:9px}.compact-panel{padding:15px;margin-bottom:22px}.compact-panel .panel-head{margin-bottom:10px}.request-count{font:800 11px Quicksand;color:#777}.request-row{display:grid;grid-template-columns:44px minmax(0,1fr) auto auto;align-items:center;gap:7px;padding:9px 0;border-top:1px solid #ddd}.request-row:first-of-type{border-top:0}.request-action{border:1.5px solid #171717;border-radius:999px;padding:7px 9px;font:800 10px Quicksand}.request-action.accept{background:#ddf3e7}.request-action.decline{background:#fff}.friends-section{margin-bottom:24px}.friend-main{border:0;background:transparent;padding:0;display:flex;align-items:center;text-align:left;gap:11px;min-width:0;flex:1}.friend-row{border:0;background:#fff;border-bottom:1px solid #ddd;padding:9px 2px;display:flex;align-items:center;text-align:left;gap:9px}.friend-profile-sheet{text-align:left}.friend-profile-card{display:grid;justify-items:center;gap:7px;padding:10px 0 20px}.friend-profile-card .profile-avatar{width:78px;height:78px;flex-basis:78px;font-size:25px}.friend-avatar,.profile-avatar{width:44px;height:44px;border:2px solid #171717;border-radius:50%;display:grid;place-items:center;font-weight:900;flex:0 0 44px}.friend-avatar.blue{background:#dcecff}.friend-avatar.peach{background:#ffe5d4}.friend-avatar.lavender{background:#e9e5ff}.friend-avatar.mint{background:#ddf3e7}.profile-avatar.blue{background:#dcecff}.profile-avatar.peach{background:#ffe5d4}.profile-avatar.lavender{background:#e9e5ff}.profile-avatar.mint{background:#ddf3e7}.friend-copy{display:grid;gap:2px;flex:1}.friend-copy strong{font:900 15px Nunito}.friend-copy small,.status{font:700 11px Quicksand;color:#777}.status{font-size:10px}.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin:24px 0 20px}.stat-grid div{background:#fff;border:2px solid #171717;border-radius:20px;padding:17px;box-shadow:-4px 5px 0 #a1a2a4;display:grid;gap:3px}.stat-grid strong{font:900 27px Nunito}.stat-grid span{font:700 11px Quicksand;color:#777}.stats-hero{margin:22px 0 14px;border:2px solid #171717;border-radius:24px;background:#e9e5ff;padding:17px;box-shadow:-5px 6px 0 #a1a2a4}.stats-hero-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.stats-hero-top>div:first-child{display:grid;gap:2px;min-width:0}.stats-hero-top .eyebrow{margin:0 0 3px;font-size:9px}.stats-hero-top strong{font:900 39px/1 Nunito;letter-spacing:-.035em}.stats-hero-top span{color:#666;font:700 10px Quicksand}.stats-hero-badge{display:flex;align-items:center;gap:6px;border:1.5px solid #171717;border-radius:999px;background:#fff;padding:7px 9px;white-space:nowrap;font:900 10px Quicksand}.stats-hero-meta{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:15px}.stats-hero-meta div{border:1.5px solid #171717;border-radius:15px;background:rgba(255,255,255,.65);padding:10px 11px;display:grid;gap:2px}.stats-hero-meta strong{font:900 18px Nunito}.stats-hero-meta span{font:700 9px Quicksand;color:#777}.panel{background:#fff;border:2px solid #171717;border-radius:22px;padding:17px;box-shadow:-5px 6px 0 #a1a2a4;margin-bottom:18px}.stats-sport-panel .panel-head{align-items:flex-start}.stats-sport-panel .panel-head>div{display:grid;gap:2px}.stats-sport-panel .panel-head strong{min-width:28px;height:28px;display:grid;place-items:center;border:1.5px solid #171717;border-radius:10px;background:#f8f8f8}.stats-bars{display:grid;gap:2px}.stats-bars .bar-row{padding:5px 0}.stats-bars .bar-row>div:first-child{font-size:11px}.stats-bars .bar{height:10px;background:#f0f0f0}.stats-bars .bar span{background:#7e9fe7}.panel-subtitle{font:700 9px Quicksand;color:#888}.player-count-line{display:flex;justify-content:space-between;gap:10px;margin-top:6px;color:#888;font:700 9px Quicksand}.players-panel .avatars{margin-top:14px;padding-left:2px}.panel-head{margin-bottom:16px}.panel-head strong{font:900 13px Quicksand}.big-progress,.bar{height:9px;background:#eee;border:1.5px solid #171717;border-radius:99px;overflow:hidden}.big-progress span,.bar span{display:block;height:100%;background:#7e9fe7;border-radius:99px}.avatars{display:flex;margin-top:15px}.avatars span{width:31px;height:31px;border:2px solid #171717;border-radius:50%;background:#ffe5d4;display:grid;place-items:center;font:800 10px Quicksand;margin-right:-5px}.avatars .empty{background:#fff}.bar-row{margin-top:14px}.bar-row>div:first-child{display:flex;justify-content:space-between;font:700 12px Quicksand;margin-bottom:5px}.profile-head{justify-content:flex-start;gap:12px}.profile-head .round{margin-left:auto}.profile-avatar{width:62px;height:62px;flex-basis:62px;background:#ffe5d4;font-size:20px}.profile-head h1{margin:0;font:900 22px Nunito}.profile-head p,.bio{margin:3px 0 0;color:#777;font:700 12px Quicksand}.bio{margin:20px 0}.sport-row{display:flex;justify-content:space-between;padding:12px 0;border-top:1px solid #ddd;font:800 13px Quicksand}.sport-row span:last-child{color:#777}.settings{display:grid;border:2px solid #171717;border-radius:20px;background:#fff;overflow:hidden;box-shadow:-4px 5px 0 #a1a2a4}.settings button{border:0;border-bottom:1px solid #ddd;background:#fff;padding:16px;text-align:left;display:flex;justify-content:space-between;align-items:center;font:800 13px Quicksand}.settings button:last-child{border-bottom:0;color:#b34a4a}.detail-screen{padding-top:20px}.back{width:43px;height:43px;border:2px solid #171717;border-radius:50%;background:#fff;display:grid;place-items:center;margin-bottom:16px}.detail-hero{border:2px solid #171717;border-radius:25px;padding:20px;box-shadow:-6px 7px 0 #a1a2a4;overflow:hidden;position:relative}.detail-hero:after{content:"";position:absolute;right:-32px;bottom:-42px;width:120px;height:120px;border:2px solid rgba(23,23,23,.09);border-radius:50%}.detail-hero.blue{background:#eef6ff}.detail-hero.peach{background:#fff0e7}.detail-hero.lavender{background:#f2efff}.detail-hero.mint{background:#e9f8f0}.detail-hero.esports{background:#f8dfe3}:global(.card.esports){background:#f8dfe3;border-color:#171717}:global(.card.esports .topline span:first-child){background:#f8dfe3;color:#a94d55}:global(.card.esports .progressbar>div){background:#df8f99}.detail-hero.esports .pill{background:#f8dfe3;color:#a94d55}.event-list-accent.esports{background:#ef9ca7}.event-status-mini.esports{background:#f8dfe3}.esports-filter-button{border-color:#d98a94!important}.hero-row{display:flex;align-items:center;justify-content:space-between;gap:10px;position:relative;z-index:1}.hero-row>div{display:flex;align-items:center;gap:8px;min-width:0}.hero-tags{min-width:0}.skill-tag{border:1.5px solid #171717;border-radius:999px;padding:5px 8px;background:rgba(255,255,255,.64);font:800 9px Quicksand;color:#5f5f5f;white-space:nowrap}.status-pill{border:1.5px solid #171717;border-radius:999px;padding:5px 8px;background:#fff;font:800 10px Quicksand}.status-pill.full{background:#ffe9bf}.status-pill.completed{background:#ddf3e7}.status-pill.cancelled{background:#ffe1e1}.hero-copy{position:relative;z-index:1}.detail-hero h1{font:900 30px/1.02 Nunito;margin:18px 0 10px;letter-spacing:-.03em;overflow-wrap:anywhere}.detail-hero p{margin:0;color:#555;font:700 13px/1.45 Quicksand}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:17px 0 16px}.detail-grid div{display:grid;grid-template-columns:22px minmax(0,1fr);align-items:center;gap:8px;min-width:0;background:#fff;border:2px solid #171717;border-radius:17px;padding:12px;font:800 11px/1.2 Quicksand;box-shadow:-2px 3px 0 #e3e3e3}.detail-grid div span{min-width:0;overflow-wrap:anywhere}.host-line{display:flex;align-items:center;gap:4px;margin:5px 3px 19px;color:#777;font:700 11px Quicksand}.primary{width:100%;border:2px solid #171717;border-radius:18px;background:#171717;color:#fff;padding:14px;font:900 14px Quicksand;box-shadow:-5px 6px 0 #a1a2a4}.join-actions{display:grid;gap:10px}.secondary,.danger{width:100%;border:2px solid #171717;border-radius:17px;background:#fff;color:#171717;padding:12px;font:900 13px Quicksand;display:flex;align-items:center;justify-content:center;gap:7px}.danger{background:#ffe7e7}.host-actions{display:grid;gap:10px}.request-box{border:2px solid #171717;border-radius:19px;background:#f1edff;padding:14px;display:grid;gap:12px;box-shadow:-4px 5px 0 #a1a2a4}.request-box>div:first-child{display:grid;gap:4px}.request-box strong{font:900 14px Nunito}.request-box span{font:700 11px Quicksand;color:#777}.request-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.accept,.decline{border:1.5px solid #171717;border-radius:13px;padding:9px;font:900 11px Quicksand;background:#ddf3e7}.decline{background:#fff}.state-message{border:2px solid #171717;border-radius:17px;background:#fff;padding:14px;text-align:center;font:800 12px Quicksand;box-shadow:-3px 4px 0 #ddd}.mock-tools{border:1.5px dashed #777;border-radius:16px;background:#f8f8f8;padding:10px 11px;display:flex;align-items:center;justify-content:space-between;gap:10px}.mock-tools>div{display:grid;gap:3px}.mock-tools span{font:700 10px/1.3 Quicksand;color:#777}.mock-tools .tiny{flex:0 0 auto}
 .toolbar-actions{display:flex;align-items:center;gap:10px}.notification-button{position:relative;width:44px;height:44px;border:2px solid #171717;border-radius:50%;background:#fff;display:grid;place-items:center;box-shadow:-4px 5px 0 #a1a2a4}.notification-dot{position:absolute;right:-4px;top:-4px;min-width:18px;height:18px;padding:0 4px;border:1.5px solid #171717;border-radius:99px;background:#ffe5d4;display:grid;place-items:center;font:900 9px Quicksand}.setting-badge{margin-left:auto;min-width:20px;height:20px;padding:0 5px;border:1.5px solid #171717;border-radius:99px;background:#dcecff;display:grid;place-items:center;font:900 9px Quicksand}.notification-list{display:grid;gap:8px;margin-bottom:12px}.notification-row{width:100%;border:2px solid #171717;border-radius:17px;background:#fff;padding:12px;display:grid;grid-template-columns:38px minmax(0,1fr) 8px;gap:10px;text-align:left;align-items:center}.notification-row.unread{background:#eef6ff}.notification-icon{width:38px;height:38px;border:1.5px solid #171717;border-radius:13px;background:#fff;display:grid;place-items:center}.notification-copy{display:grid;gap:3px}.notification-copy strong{font:900 14px Nunito}.notification-copy span{font:700 11px/1.35 Quicksand;color:#555}.notification-copy small{font:700 10px Quicksand;color:#888}.unread-dot{width:7px;height:7px;border-radius:50%;background:#7e9fe7;border:1px solid #171717}.chat-sheet{max-height:88vh}.chat-meta{display:flex;gap:8px;margin:-8px 0 14px}.chat-meta span{border:1.5px solid #171717;border-radius:999px;background:#fff;padding:6px 9px;font:800 10px Quicksand;color:#666}.chat-list{display:grid;gap:10px;max-height:48vh;overflow:auto;padding:3px 2px 12px}.chat-message{display:flex;align-items:flex-end;gap:7px;max-width:88%}.chat-message.mine{margin-left:auto;flex-direction:row-reverse}.chat-avatar{width:30px;height:30px;flex:0 0 30px;border:1.5px solid #171717;border-radius:50%;background:#ffe5d4;display:grid;place-items:center;font:900 10px Quicksand}.chat-bubble{border:2px solid #171717;border-radius:16px 16px 16px 5px;background:#fff;padding:8px 10px;min-width:0}.chat-message.mine .chat-bubble{border-radius:16px 16px 5px 16px;background:#e9e5ff}.chat-bubble p{margin:0;font:700 12px/1.35 Quicksand;overflow-wrap:anywhere}.chat-bubble small{display:block;margin-top:4px;color:#888;font:700 9px Quicksand}.chat-composer{display:grid;grid-template-columns:minmax(0,1fr) 46px;gap:8px;margin-top:4px}.chat-composer input{height:46px!important;min-width:0}.chat-send{width:46px;height:46px;border:2px solid #171717;border-radius:15px;background:#171717;color:#fff;display:grid;place-items:center;box-shadow:-3px 4px 0 #a1a2a4}.chat-send:active{transform:translate(-1px,1px);box-shadow:-2px 2px 0 #a1a2a4}.rating-sheet{max-height:90vh}.rating-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-6px 0 10px;padding:11px 12px;border:1.5px solid #171717;border-radius:15px;background:#fff;box-shadow:-3px 4px 0 #ddd}.rating-summary-copy{display:grid;gap:2px;min-width:0}.rating-summary-copy strong{font:900 13px Nunito}.rating-summary-copy span{font:700 10px Quicksand;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rating-progress{border:1.5px solid #171717;border-radius:999px;background:#e9e5ff;padding:6px 8px;font:900 9px Quicksand;white-space:nowrap}.rating-host-note{display:flex;align-items:center;gap:7px;margin:0 0 12px;padding:9px 10px;border:1.5px solid #171717;border-radius:13px;background:#ddf3e7;font:800 10px Quicksand;color:#4e6e59}.rating-list{display:grid;gap:10px;margin-bottom:14px}.rating-row{border:2px solid #171717;border-radius:18px;background:#fff;padding:11px;display:grid;gap:9px;box-shadow:-3px 4px 0 #ddd}.rating-row.rating-complete{background:#fafdfb}.rating-row-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.rating-person{display:flex;align-items:center;gap:9px;min-width:0}.rating-person>span:last-child{display:grid;gap:2px;min-width:0}.rating-person strong{font:900 14px Nunito;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rating-person small{font:700 10px Quicksand;color:#777}.rating-row-status{border:1.5px solid #171717;border-radius:999px;background:#f8f8f8;padding:5px 7px;font:900 8.5px Quicksand;white-space:nowrap}.rating-complete .rating-row-status{background:#ddf3e7}.rating-score{display:grid;grid-template-columns:minmax(0,1fr) 46px 46px;align-items:center;gap:7px;min-width:0;isolation:isolate}.rating-stepper{position:relative;z-index:3;display:flex;align-items:center;justify-content:center;width:46px;min-width:46px;height:46px;border:1.5px solid #171717;border-radius:12px;background:#fff;color:#171717;font:900 22px/1 Nunito;box-shadow:-3px 4px 0 #a1a2a4;pointer-events:auto;touch-action:manipulation;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;padding:0}.rating-stepper:active{transform:translate(-1px,1px);box-shadow:-2px 2px 0 #a1a2a4}.stars{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;width:100%;min-width:0;height:40px;border-radius:11px}.star-choice{width:100%;min-width:0;height:40px;border:1.5px solid #171717;border-radius:10px;background:#fff;color:#aaa;display:grid;place-items:center;user-select:none;pointer-events:auto;-webkit-user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation;padding:0;font:900 19px/1 Quicksand}.star-choice:disabled{opacity:1}.star-choice.filled{background:#ffe9bf;color:#171717}.star-choice.selected-star{box-shadow:-2px 2px 0 #a1a2a4}.star-choice:active{transform:translate(-1px,1px);box-shadow:-1px 2px 0 #a1a2a4}.rating-value{display:block;text-align:center;color:#777;font:800 10px Quicksand;white-space:nowrap;margin-top:-1px}.rating-toggles{display:grid;grid-template-columns:1fr 1fr;gap:7px}.rating-toggles button{border:1.5px solid #171717;border-radius:12px;background:#fff;padding:8px;font:800 10px Quicksand}.rating-toggles button.on{background:#ddf3e7}.profile-sport-grid{margin-bottom:10px}.profile-sport-grid button{border:2px solid #171717;border-radius:17px;background:#fff;padding:12px;display:flex;justify-content:space-between;align-items:center;font:900 12px Quicksand;box-shadow:-3px 4px 0 #ddd}.profile-sport-grid button.selected{background:#e9e5ff;box-shadow:-3px 4px 0 #a1a2a4}.profile-levels{margin-top:18px}.level-row{display:grid;gap:7px;padding:12px 0;border-top:1px solid #ddd}.level-row:first-child{border-top:0;padding-top:0}.level-row-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px}.level-row-head strong{font:900 13px Nunito}.level-row-head span{color:#888;font:700 9.5px Quicksand}.profile-skill-list{padding:0;gap:7px}.profile-skill-list button{min-height:58px}.profile-skill-list button.selected-choice{background:#e9e5ff;box-shadow:-2px 3px 0 #a1a2a4}.setting-card{border:2px solid #171717;border-radius:17px;background:#fff;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px;box-shadow:-3px 4px 0 #ddd}.setting-card>span:first-child{display:grid;gap:3px}.setting-card strong{font:900 12px Nunito}.setting-card small{font:700 11px Quicksand;color:#777}.setting-value{font:800 10px Quicksand;background:#ddf3e7;border:1.5px solid #171717;border-radius:999px;padding:6px 8px}.toggle-row{width:100%;border:0;border-bottom:1px solid #ddd;background:#fff;padding:14px 0;display:flex;align-items:center;justify-content:space-between;gap:12px;text-align:left}.toggle-row>span:first-child{display:grid;gap:3px}.toggle-row strong{font:900 13px Nunito}.toggle-row small{font:700 10px/1.3 Quicksand;color:#777}.toggle{width:46px;height:27px;border:2px solid #171717;border-radius:99px;background:#eee;padding:3px;display:flex;align-items:center;justify-content:flex-start;flex:0 0 auto}.toggle span{width:17px;height:17px;border-radius:50%;background:#fff;border:1.5px solid #171717;box-shadow:-1px 2px 0 #aaa}.toggle.on{background:#dcecff;justify-content:flex-end}.toggle.on span{box-shadow:none}.scrim{position:fixed;inset:0;background:rgba(0,0,0,.38);z-index:10000;display:flex;align-items:flex-end}.scrim-backdrop{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;padding:0;cursor:default}.sheet{position:relative;z-index:10001;width:min(430px,100%);margin:0 auto;background:#fbfbfb;border:2px solid #171717;border-bottom:0;border-radius:27px 27px 0 0;padding:20px 16px 120px;max-height:92vh;overflow:auto}.sheet h2{margin:0;font:900 25px Nunito}.sheet-head{margin-bottom:20px}.sheet-note{margin:-8px 0 16px;color:#666;font:700 12px Quicksand}.sheet .form-field{position:relative;z-index:2;display:grid;gap:6px;margin-bottom:13px}.sheet .form-field>.field-label{font:800 11px Quicksand}.sheet input,.sheet textarea{position:relative;z-index:3;pointer-events:auto;touch-action:auto;border:2px solid #171717;border-radius:14px;background:#fff;padding:0 12px;outline:0;font:700 13px Quicksand}.sheet input{height:45px}.sheet textarea{padding-top:11px;resize:vertical;min-height:75px}.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.picker-row{align-items:start}.picker-field{display:grid;gap:6px;min-width:0}.picker-label{font:800 11px Quicksand;display:block}.picker-button{position:relative;z-index:3;cursor:pointer;height:58px;width:100%;border:2px solid #171717;border-radius:16px;background:#fff;padding:8px 10px;display:flex;align-items:center;gap:8px;text-align:left;color:#171717;font:800 11px Quicksand;box-shadow:-3px 4px 0 #ddd;touch-action:manipulation;pointer-events:auto}.picker-button:active{transform:translate(-1px,1px);box-shadow:-2px 2px 0 #ddd}.picker-button-copy{display:grid;gap:2px;min-width:0;flex:1}.picker-button-copy strong{font:900 13px Nunito;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.picker-button-copy small{font:700 9px Quicksand;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.picker-button.placeholder .picker-button-copy strong{color:#777}.picker-popover{margin:-4px 0 14px;border:2px solid #171717;border-radius:19px;background:#fff;box-shadow:-5px 6px 0 #a1a2a4;position:relative;z-index:2;overflow:hidden}.calendar-popover{padding:14px}.calendar-head{display:grid;grid-template-columns:38px 1fr 38px;align-items:center;gap:8px;text-align:center;margin-bottom:12px}.calendar-head strong{font:900 15px Nunito;text-transform:capitalize}.calendar-nav{width:36px;height:36px;border:1.5px solid #171717;border-radius:12px;background:#f8f8f8;display:grid;place-items:center}.weekdays,.calendar-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}.weekdays{margin-bottom:5px}.weekdays span{text-align:center;color:#888;font:800 10px Quicksand;padding:5px 0}.calendar-grid button,.calendar-grid span{height:36px}.calendar-grid button{border:1.5px solid transparent;border-radius:11px;background:#fff;font:800 12px Quicksand}.calendar-grid button:hover:not(:disabled){border-color:#171717;background:#f7f7f7}.calendar-grid button.selected{background:#dcecff;border-color:#171717;box-shadow:-2px 2px 0 #a1a2a4}.calendar-grid button:disabled{color:#c5c5c5;cursor:not-allowed}.time-popover{padding:14px}.time-wheel{height:220px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;position:relative;overflow:hidden}.wheel-column{height:220px;overflow-y:auto;scroll-snap-type:y mandatory;scrollbar-width:none;-ms-overflow-style:none;overscroll-behavior:contain}.wheel-column::-webkit-scrollbar{display:none}.wheel-column button{display:block;width:100%;height:44px;border:0;background:transparent;color:#777;font:800 26px/44px Quicksand;scroll-snap-align:center;opacity:.32}.wheel-column button.active-wheel{color:#171717;opacity:1;font-size:28px}.period-wheel button{font-size:25px}.wheel-spacer{height:88px;pointer-events:none}.wheel-selection{position:absolute;left:0;right:0;top:88px;height:44px;border-top:1.5px solid rgba(23,23,23,.2);border-bottom:1.5px solid rgba(23,23,23,.2);pointer-events:none}.wheel-fade{position:absolute;left:0;right:0;height:76px;z-index:2;pointer-events:none}.wheel-fade.top{top:0;background:linear-gradient(#fff,rgba(255,255,255,0))}.wheel-fade.bottom{bottom:0;background:linear-gradient(rgba(255,255,255,0),#fff)}.wheel-done{width:100%;margin-top:12px;border:2px solid #171717;border-radius:14px;background:#171717;color:#fff;height:43px;font:900 12px Quicksand}.event-editor-sheet{max-height:92vh;padding-bottom:68px;scroll-padding-top:18px;scroll-padding-bottom:72px} .event-editor-sheet .sheet-head{position:sticky;top:-20px;z-index:12;margin:0 -16px 20px;padding:20px 16px 14px;background:linear-gradient(#fbfbfb 76%,rgba(251,251,251,0));backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)} .event-editor-sheet .sheet-head>div{min-width:0}.event-editor-sheet .sheet-head h2{font-size:26px}.event-editor-sheet .form-field{margin-bottom:16px}.event-editor-sheet .form-field>label,.event-editor-sheet .field-label,.event-editor-sheet .picker-label{font-size:10px;letter-spacing:.055em;text-transform:uppercase;color:#666}.event-editor-sheet .form-field>input,.event-editor-sheet .form-field>textarea{box-shadow:-2px 3px 0 #e1e1e1;transition:border-color 160ms ease,box-shadow 160ms ease,transform 160ms ease}.event-editor-sheet .form-field>input:focus,.event-editor-sheet .form-field>textarea:focus{border-color:#171717;box-shadow:-3px 4px 0 #bfc5d3;transform:translateY(-1px)}.event-editor-sheet .choice-button{min-height:58px;border:2px solid #171717;border-radius:16px;background:#fff;box-shadow:-3px 4px 0 #ddd}.event-editor-sheet .choice-button>span{min-width:0}.event-editor-sheet .choice-button strong{font:900 14px Nunito;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-editor-sheet .choice-button small{font:700 9.5px Quicksand;color:#888;display:block;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-editor-sheet .choice-button:active{transform:translate(-1px,1px);box-shadow:-2px 2px 0 #ddd}.event-editor-sheet .picker-button{box-shadow:-3px 4px 0 #ddd}.event-editor-sheet .primary{position:sticky;bottom:-20px;z-index:11;margin-top:6px;box-shadow:0 -10px 18px rgba(251,251,251,.92),-5px 6px 0 #a1a2a4}.event-editor-sheet .form-hint{display:block;margin-top:-7px;color:#888;font:700 9.5px/1.35 Quicksand}.event-editor-sheet .choice-popover,.event-editor-sheet .picker-popover{box-shadow:-4px 5px 0 #a1a2a4}.event-editor-sheet .choice-grid,.event-editor-sheet .choice-list{gap:7px}.event-editor-sheet .event-type-choice,.event-editor-sheet .choice-list>button{min-height:48px}.event-editor-sheet textarea{line-height:1.35;padding-top:11px}.event-editor-sheet .sheet-head .round{flex:0 0 auto}
-.events-sheet{max-height:88vh}.events-segment{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:-2px 0 14px;padding:4px;border:2px solid #171717;border-radius:15px;background:#eee}.events-segment button{border:0;border-radius:11px;background:transparent;padding:9px 8px;font:900 12px Quicksand;color:#777}.events-segment button.active{background:#fff;color:#171717;box-shadow:-2px 3px 0 #c8c8c8}.events-list{display:grid;gap:9px}.event-list-row{width:100%;display:grid;grid-template-columns:6px minmax(0,1fr) auto;align-items:center;gap:10px;text-align:left;border:2px solid #171717;border-radius:17px;background:#fff;padding:11px 10px 11px 0;box-shadow:-3px 4px 0 #ddd}.event-list-row:active{transform:translate(-1px,1px);box-shadow:-2px 2px 0 #ddd}.event-list-accent{width:6px;align-self:stretch;border-radius:0 8px 8px 0;background:#ddf3e7}.event-list-accent.blue{background:#dcecff}.event-list-accent.peach{background:#ffe5d4}.event-list-accent.lavender{background:#e9e5ff}.event-list-copy{display:grid;gap:3px;min-width:0}.event-list-copy strong{font:900 14px/1.15 Nunito;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-list-copy small{font:800 10px Quicksand;color:#666}.event-list-copy>span{font:700 10px/1.25 Quicksand;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-list-side{display:grid;justify-items:end;gap:7px;align-items:center}.event-status-mini{border:1.5px solid #171717;border-radius:999px;background:#eef6ff;padding:5px 7px;font:900 8.5px Quicksand;white-space:nowrap}.event-status-mini.full{background:#ffe9bf}.event-status-mini.completed{background:#ddf3e7}.event-status-mini.cancelled{background:#ffe1e1}.toast{position:fixed;z-index:50;bottom:calc(178px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);background:#171717;color:#fff;border-radius:999px;padding:10px 15px;font:800 11px Quicksand;white-space:nowrap}@media(max-width:360px){.detail-grid{grid-template-columns:1fr}.hero-row{align-items:flex-start}.detail-hero h1{font-size:28px}.players-panel{padding:15px}}
+.events-sheet{max-height:88vh}.events-segment{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:-2px 0 14px;padding:4px;border:2px solid #171717;border-radius:15px;background:#eee}.events-segment button{border:0;border-radius:11px;background:transparent;padding:9px 8px;font:900 12px Quicksand;color:#777}.events-segment button.active{background:#fff;color:#171717;box-shadow:-2px 3px 0 #c8c8c8}.events-list{display:grid;gap:9px}.event-list-row{width:100%;display:grid;grid-template-columns:6px minmax(0,1fr) auto;align-items:center;gap:10px;text-align:left;border:2px solid #171717;border-radius:17px;background:#fff;padding:11px 10px 11px 0;box-shadow:-3px 4px 0 #ddd}.event-list-row:active{transform:translate(-1px,1px);box-shadow:-2px 2px 0 #ddd}.event-list-accent{width:6px;align-self:stretch;border-radius:0 8px 8px 0;background:#ddf3e7}.event-list-accent.blue{background:#dcecff}.event-list-accent.peach{background:#ffe5d4}.event-list-accent.lavender{background:#e9e5ff}.event-list-copy{display:grid;gap:3px;min-width:0}.event-list-copy strong{font:900 14px/1.15 Nunito;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-list-copy small{font:800 10px Quicksand;color:#666}.event-list-copy>span{font:700 10px/1.25 Quicksand;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-list-side{display:grid;justify-items:end;gap:7px;align-items:center}.event-status-mini{border:1.5px solid #171717;border-radius:999px;background:#eef6ff;padding:5px 7px;font:900 8.5px Quicksand;white-space:nowrap}.event-status-mini.full{background:#ffe9bf}.event-status-mini.completed{background:#ddf3e7}.event-status-mini.cancelled{background:#ffe1e1}.primary.request-pending-button{background:#e6e6e6;color:#6f6f6f;-webkit-text-fill-color:#6f6f6f;box-shadow:-3px 4px 0 #c4c4c4;cursor:default}.toast{position:fixed;z-index:10002;bottom:calc(178px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);background:#171717;color:#fff;border-radius:999px;padding:10px 15px;font:800 11px Quicksand;white-space:nowrap}@media(max-width:360px){.detail-grid{grid-template-columns:1fr}.hero-row{align-items:flex-start}.detail-hero h1{font-size:28px}}
 @media(min-width:431px){.app-shell{margin-top:12px;min-height:calc(100vh - 24px);border-radius:5px}}
+.site-footer{padding:18px 16px calc(96px + env(safe-area-inset-bottom));text-align:center;color:#858585;font:700 10px/1.5 Quicksand,sans-serif;letter-spacing:.015em;border-top:1px solid #ededed;background:#fbfbfb}
+
 
 /* Unified selection + chat surface */
 .selection-sheet{padding-top:20px}
@@ -2914,4 +3027,92 @@
 @media(prefers-reduced-motion:reduce){
   .notification-row,.chat-event-row{transition:none}
 }
+
+/* Final interaction polish: keyboard focus stays visible without changing the pastel palette. */
+:global(:focus-visible) {
+  outline: 3px solid #7e9fe7;
+  outline-offset: 3px;
+}
+
+button,
+input,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:not(:disabled) {
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+  border-color: #7e9fe7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button:not(:disabled) {
+    transition: none;
+  }
+}
+
+.editor-error {
+  margin: 2px 0 0;
+  color: #a13d3d;
+  font: 800 11px/1.4 Quicksand, sans-serif;
+}
+
+
+
+/* Friend requests: keep the profile and both actions in separate grid columns. */
+.request-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 0;
+}
+
+.request-person {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.request-person .friend-copy {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.request-person .friend-copy strong,
+.request-person .friend-copy small {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.request-action {
+  min-width: 60px;
+  min-height: 36px;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 360px) {
+  .request-row {
+    gap: 6px;
+    padding: 12px 0;
+  }
+
+  .request-action {
+    min-width: 56px;
+    padding: 7px 7px;
+    font-size: 9px;
+  }
+}
+
 </style>

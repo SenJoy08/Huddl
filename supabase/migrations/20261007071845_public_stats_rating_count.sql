@@ -1,7 +1,3 @@
--- Keep the data-aggregating implementation privileged and internal, while
--- leaving the public API function SECURITY INVOKER so the exposed RPC itself
--- is not a SECURITY DEFINER endpoint.
-
 create or replace function private.get_public_player_stats_internal(p_user_id uuid)
 returns jsonb
 language plpgsql
@@ -28,7 +24,6 @@ begin
     from public.events e
     join public.event_members em on em.event_id = e.id
     where em.user_id = p_user_id
-      and e.event_type_code = 'sport'
       and e.status = 'completed'
   ),
   received_ratings as (
@@ -46,18 +41,28 @@ begin
     where em.user_id = p_user_id
       and em.showed_up is not null
   ),
-  sports_breakdown as (
-    select s.name, count(distinct ce.id)::int as games
+  activity_names as (
+    select ce.id, s.name
     from completed_events ce
     join public.event_sports es on es.event_id = ce.id
     join public.sports s on s.id = es.sport_id
-    group by s.name
-    order by games desc, s.name
+    union all
+    select ce.id, eg.name
+    from completed_events ce
+    join public.event_esports ee on ee.event_id = ce.id
+    join public.esports_games eg on eg.id = ee.game_id
+  ),
+  sports_breakdown as (
+    select name, count(distinct id)::int as games
+    from activity_names
+    group by name
+    order by games desc, name
   )
   select jsonb_build_object(
     'games', (select count(*)::int from completed_events),
     'hosted', (select count(*)::int from completed_events where host_id = p_user_id),
     'rating', (select round(avg(score)::numeric, 1) from received_ratings),
+    'ratingCount', (select count(*)::int from received_ratings),
     'attendance', (
       select case
         when count(*) = 0 then null
@@ -75,17 +80,4 @@ begin
 
   return v_result;
 end;
-$function$;
-
-grant execute on function private.get_public_player_stats_internal(uuid)
-to authenticated;
-
-create or replace function public.get_public_player_stats(p_user_id uuid)
-returns jsonb
-language sql
-stable
-security invoker
-set search_path = public, pg_catalog
-as $function$
-  select private.get_public_player_stats_internal(p_user_id);
-$function$;
+$function$;;

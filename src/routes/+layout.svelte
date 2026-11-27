@@ -7,3 +7,19 @@
 </svelte:head>
 
 <slot />
+
+<style>
+  :global(*),
+  :global(*::before),
+  :global(*::after) {
+    box-sizing: border-box;
+  }
+  :global(input),
+  :global(textarea),
+  :global(select) {
+    font-size: 16px !important;
+    line-height: 1.2;
+    -webkit-text-size-adjust: 100%;
+  }
+
+</style>

@@ -4,6 +4,8 @@
   import AuthShell from '$lib/components/AuthShell.svelte';
   import { getSession, signOut } from '$lib/auth/session.js';
   import { supabase } from '$lib/supabase/client.js';
+  import { saveProfileSports } from '$lib/data/profile.js';
+  import { mapProfileSports } from '$lib/onboarding/profile-sports.js';
 
   const sports = ['Football', 'Volleyball', 'Tennis', 'Basketball', 'Badminton', 'Chess', 'Pool', 'Table Tennis', 'Cricket', 'Futsal', 'Squash', 'Box Cricket'];
   const levels = ['Beginner', 'Amateur', 'Intermediate', 'Seasoned', 'Professional'];
@@ -37,41 +39,25 @@
     user = {
       id: authSession.user.id,
       name:
+        authSession.user.user_metadata?.display_name ??
         authSession.user.user_metadata?.name ??
         authSession.user.email?.split('@')[0] ??
         'Player',
       email: authSession.user.email ?? ''
     };
 
-    const [{ data: existingProfile }, { data: existingSports }] = await Promise.all([
-      supabase
-        .from('profiles')
-        .select('display_name, handle, bio')
-        .eq('id', user.id)
-        .maybeSingle(),
-      supabase
-        .from('profile_sports')
-        .select('sport_id, skill_level_code, sports(name), skill_levels(name)')
-        .eq('profile_id', user.id)
-    ]);
+    const { data: existingSports, error: existingSportsError } = await supabase
+      .from('profile_sports')
+      .select('sport_id, skill_level_code, sports(name), skill_levels(name)')
+      .eq('profile_id', user.id);
 
-    if (existingProfile?.display_name) {
-      user = { ...user, name: existingProfile.display_name };
+    if (existingSportsError) {
+      error = userFacingError(existingSportsError, 'Could not load your saved sports. Please try again.');
+      return;
     }
 
     if (existingSports?.length) {
-      selected = existingSports
-        .map((row) => row.sports?.[0]?.name)
-        .filter(Boolean);
-
-      skills = Object.fromEntries(
-        existingSports
-          .filter((row) => row.sports?.[0]?.name)
-          .map((row) => [
-            row.sports[0].name,
-            row.skill_levels?.[0]?.name ?? 'Intermediate'
-          ])
-      );
+      ({ selected, skills } = mapProfileSports(existingSports));
     }
   });
 
@@ -171,64 +157,9 @@
       }
     }
 
-    const { data: sportRows, error: sportsError } = await supabase
-      .from('sports')
-      .select('id, name')
-      .in('name', selected);
-
-    if (sportsError) {
-      error = userFacingError(sportsError, 'Could not load the sports list. Please try again.');
-      saving = false;
-      return;
-    }
-
-    const { data: skillRows, error: skillsError } = await supabase
-      .from('skill_levels')
-      .select('code, name')
-      .in('name', levels);
-
-    if (skillsError) {
-      error = userFacingError(skillsError, 'Could not load skill levels. Please try again.');
-      saving = false;
-      return;
-    }
-
-    const sportIdByName = new Map(
-      (sportRows ?? []).map((row) => [row.name, row.id])
-    );
-    const skillCodeByName = new Map(
-      (skillRows ?? []).map((row) => [row.name, row.code])
-    );
-
-    const profileSports = selected.map((sport) => ({
-      profile_id: userId,
-      sport_id: sportIdByName.get(sport),
-      skill_level_code: skillCodeByName.get(skills[sport] ?? 'Intermediate')
-    }));
-
-    if (profileSports.some((row) => !row.sport_id || !row.skill_level_code)) {
-      error = 'Could not match one or more sports or skill levels.';
-      saving = false;
-      return;
-    }
-
-    const { error: deleteSportsError } = await supabase
-      .from('profile_sports')
-      .delete()
-      .eq('profile_id', user.id);
-
-    if (deleteSportsError) {
-      error = userFacingError(deleteSportsError, 'Could not update your sports. Please try again.');
-      saving = false;
-      return;
-    }
-
-    const { error: insertSportsError } = await supabase
-      .from('profile_sports')
-      .insert(profileSports);
-
-    if (insertSportsError) {
-      error = userFacingError(insertSportsError, 'Could not save your sports. Please try again.');
+    const { error: sportsSaveError } = await saveProfileSports(userId, selected, skills);
+    if (sportsSaveError) {
+      error = userFacingError(sportsSaveError, 'Could not save your sports. Please try again.');
       saving = false;
       return;
     }

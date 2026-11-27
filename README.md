@@ -1,5 +1,9 @@
 # Huddl
 
+## Huddl V2.0
+
+This folder is the independent V2 application copy. It preserves the V30 visual design and flows while adding safer event/profile writes, private-event previews, guarded social writes, and clearer Svelte component boundaries. It does not change the V30 source.
+
 **Built and maintained by Sanjay Shashibushan**
 
 Huddl is a mobile-first platform for finding people to play sports and esports with. Users can discover games, host public or private events, join or request access to games, connect with friends, chat with event participants, and build a player profile from participation and ratings.
@@ -23,6 +27,7 @@ Repository: [SenJoy08/Huddl](https://github.com/SenJoy08/Huddl)
 - [Contributing and update workflow](#contributing-and-update-workflow)
 - [Testing and release checklist](#testing-and-release-checklist)
 - [Current limitations and operational notes](#current-limitations-and-operational-notes)
+- [Audit report](#audit-report)
 
 ## What Huddl does
 
@@ -68,7 +73,7 @@ Huddl helps people organize pickup games and find players at a suitable skill le
 
 - Join public games when eligible and space is available.
 - Request to join private games; the host can review requests and make a decision.
-- Private events remain discoverable/requestable, while details are restricted to the host, members, and users with a pending join request according to database policies.
+- Private events remain discoverable/requestable as date-and-time cards. Location, description, and attendee identities are returned only to the host and event members; joining is required to see them.
 - Hosts appear as participants in their own events.
 - Event membership, capacity, and join-request state are coordinated through Supabase data operations/RPCs.
 - Past, completed, or cancelled events cannot be joined or requested through the enforced time-boundary checks.
@@ -374,7 +379,10 @@ Before releasing a change, test the flows affected by it. For a broad release, u
 - Profile photo upload is not currently a core feature; player identities use initials and generated pastel colors.
 - The Supabase security review previously identified leaked-password protection as a remaining hardening item. Review Supabase Auth's password-security settings before broad public launch, depending on plan availability.
 - Performance tooling previously reported unused-index suggestions. Keep indexes until actual query patterns and production traffic have been assessed; do not remove indexes solely because an advisor labels them unused in a low-traffic environment.
-- This README describes the current project direction and implemented feature set; confirm behavior in the current source and live deployment when changing database policies or release settings.
+- The repository migration history does not yet fully reproduce the current live Supabase schema from an empty database. See `supabase/README.md` and `AUDIT-REPORT.md` before applying database changes.
+- Chat loads the newest 200 messages per event, and event discovery uses bounded loading rather than full pagination.
+- A static code audit is available in [`AUDIT-REPORT.md`](AUDIT-REPORT.md). In this packaged audit version, the full Svelte diagnostics and production build still need to be run on a machine where `npm ci` completes successfully.
+- This README describes the current project direction and implemented feature set; verify the live deployment and run multi-account smoke tests when changing database policies or release settings.
 
 ---
 

@@ -25,7 +25,7 @@ function formatSports(value) {
  * @returns {Promise<{ friends: HuddlFriend[], candidates: FriendCandidate[], incomingRequests: IncomingFriendRequest[], people: FriendSearchPerson[] }>}
  */
 export async function loadFriends(userId) {
-  const [friendshipsResult, incomingResult, outgoingResult, profilesResult, profileSportsResult] = await Promise.all([
+  const [friendshipsResult, incomingResult, outgoingResult, profilesResult] = await Promise.all([
     supabase
       .from('friendships')
       .select('user_a, user_b')
@@ -45,24 +45,51 @@ export async function loadFriends(userId) {
       .select('id, display_name, handle, bio')
       .neq('id', userId)
       .order('display_name', { ascending: true })
-      .limit(250),
-    supabase
-      .from('profile_sports')
-      .select('profile_id, sport_id')
+      .limit(250)
   ]);
 
   const firstError = friendshipsResult.error
     ?? incomingResult.error
     ?? outgoingResult.error
-    ?? profilesResult.error
-    ?? profileSportsResult.error;
+    ?? profilesResult.error;
   if (firstError) throw firstError;
 
   const friendshipRows = friendshipsResult.data ?? [];
   const incomingRows = incomingResult.data ?? [];
   const outgoingRows = outgoingResult.data ?? [];
-  const profiles = profilesResult.data ?? [];
-  const profileSports = profileSportsResult.data ?? [];
+  const profiles = [...(profilesResult.data ?? [])];
+
+  // The 250-profile cap is for discovery/search only. Always fetch exact IDs
+  // referenced by existing relationships, otherwise friends alphabetically
+  // beyond that cap can disappear from the friends and pending-request lists.
+  const relationshipProfileIds = [...new Set([
+    ...friendshipRows.flatMap((row) => [row.user_a, row.user_b]),
+    ...incomingRows.map((row) => row.sender_id),
+    ...outgoingRows.map((row) => row.receiver_id)
+  ].filter((id) => id && id !== userId))];
+  const knownProfileIds = new Set(profiles.map((profile) => profile.id));
+  const missingRelationshipIds = relationshipProfileIds.filter((id) => !knownProfileIds.has(id));
+  if (missingRelationshipIds.length) {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, display_name, handle, bio')
+      .in('id', missingRelationshipIds);
+    if (error) throw error;
+    profiles.push(...(data ?? []));
+  }
+
+  // Only load sport associations for profiles this view can actually display.
+  const visibleProfileIds = [...new Set(profiles.map((profile) => profile.id))];
+  /** @type {{ profile_id: string, sport_id: string }[]} */
+  let profileSports = [];
+  if (visibleProfileIds.length) {
+    const { data, error } = await supabase
+      .from('profile_sports')
+      .select('profile_id, sport_id')
+      .in('profile_id', visibleProfileIds);
+    if (error) throw error;
+    profileSports = data ?? [];
+  }
 
   const sportIds = [...new Set(profileSports.map((row) => row.sport_id))];
   /** @type {{ id: string, name: string }[]} */

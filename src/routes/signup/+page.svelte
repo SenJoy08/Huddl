@@ -45,7 +45,8 @@
     try {
       const result = await signUp(email.trim(), password, {
         data: {
-          name: name.trim()
+          name: name.trim(),
+          display_name: name.trim()
         },
         emailRedirectTo:
           typeof window !== 'undefined'

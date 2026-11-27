@@ -1,4 +1,6 @@
 import { supabase } from '$lib/supabase/client.js';
+import { normalizeProfileHandle } from './profile-handle.js';
+export { normalizeProfileHandle };
 
 /**
  * @typedef {{
@@ -177,7 +179,12 @@ export async function loadUserProfile(userId) {
 
 /** @param {string} userId @param {{name:string,handle:string,bio:string}} values */
 export async function saveProfileBasics(userId, values) {
-  const handle = values.handle.trim();
+  let handle;
+  try {
+    handle = normalizeProfileHandle(values.handle);
+  } catch (error) {
+    return { error };
+  }
 
   if (handle) {
     const { data: conflictingProfile, error: handleLookupError } = await supabase
@@ -191,32 +198,48 @@ export async function saveProfileBasics(userId, values) {
     if (conflictingProfile) return { error: new Error('That handle is already taken.') };
   }
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('profiles')
     .update({
       display_name: values.name,
       handle,
       bio: values.bio
     })
-    .eq('id', userId);
+    .eq('id', userId)
+    .select('id')
+    .maybeSingle();
 
-  return { error };
+  if (error) return { error };
+  if (!data) return { error: new Error('Your profile could not be found. Refresh the app and sign in again.') };
+  return { error: null, handle };
 }
 
 /** @param {string} userId @param {string[]} sports @param {Record<string,string>} skills */
 export async function saveProfileSports(userId, sports, skills) {
-  const { data: sportRows, error: sportError } = await supabase
-    .from('sports')
-    .select('id, name')
-    .in('name', sports);
-  if (sportError) return { error: sportError };
+  // An empty selection is valid (the user may clear all sports). Avoid an
+  // empty `in` filter, which some PostgREST versions reject as malformed.
+  /** @type {{ id: string, name: string }[]} */
+  let sportRows = [];
+  if (sports.length) {
+    const { data, error } = await supabase
+      .from('sports')
+      .select('id, name')
+      .in('name', sports);
+    if (error) return { error };
+    sportRows = data ?? [];
+  }
 
   const skillNames = sports.map((sport) => skills[sport] ?? 'Intermediate');
-  const { data: skillRows, error: skillError } = await supabase
-    .from('skill_levels')
-    .select('code, name')
-    .in('name', skillNames);
-  if (skillError) return { error: skillError };
+  /** @type {{ code: string, name: string }[]} */
+  let skillRows = [];
+  if (skillNames.length) {
+    const { data, error } = await supabase
+      .from('skill_levels')
+      .select('code, name')
+      .in('name', skillNames);
+    if (error) return { error };
+    skillRows = data ?? [];
+  }
 
   const sportIdByName = new Map((sportRows ?? []).map((row) => [row.name, row.id]));
   const skillCodeByName = new Map((skillRows ?? []).map((row) => [row.name, row.code]));
@@ -230,14 +253,36 @@ export async function saveProfileSports(userId, sports, skills) {
     return { error: new Error('Could not match one or more sports or skill levels.') };
   }
 
-  const { error: deleteError } = await supabase
+  // Save new selections before removing old ones. If the write fails, the current
+  // profile-sport rows remain intact instead of being deleted first.
+  const { data: existingRows, error: existingError } = await supabase
     .from('profile_sports')
-    .delete()
+    .select('sport_id')
     .eq('profile_id', userId);
-  if (deleteError) return { error: deleteError };
+  if (existingError) return { error: existingError };
 
-  const { error: insertError } = await supabase.from('profile_sports').insert(rows);
-  return { error: insertError };
+  if (rows.length) {
+    const { error: upsertError } = await supabase
+      .from('profile_sports')
+      .upsert(rows, { onConflict: 'profile_id,sport_id' });
+    if (upsertError) return { error: upsertError };
+  }
+
+  const retainedSportIds = new Set(rows.map((row) => row.sport_id));
+  const obsoleteSportIds = (existingRows ?? [])
+    .map((row) => row.sport_id)
+    .filter((sportId) => !retainedSportIds.has(sportId));
+
+  if (obsoleteSportIds.length) {
+    const { error: cleanupError } = await supabase
+      .from('profile_sports')
+      .delete()
+      .eq('profile_id', userId)
+      .in('sport_id', obsoleteSportIds);
+    if (cleanupError) return { error: cleanupError };
+  }
+
+  return { error: null };
 }
 
 /** @param {string} userId @param {{eventNotifications:boolean,friendNotifications:boolean,ratingNotifications:boolean}} values */
@@ -253,6 +298,24 @@ export async function saveNotificationPreferences(userId, values) {
       },
       { onConflict: 'user_id' }
     );
+  return { error };
+}
+
+
+/**
+ * Save notification preferences and contact visibility in one database
+ * transaction. The database derives the target user from auth.uid().
+ * @param {{eventNotifications:boolean,friendNotifications:boolean,ratingNotifications:boolean,showContact:boolean}} values
+ * @returns {Promise<{error: Error | null}>}
+ */
+export async function saveUserSettings(values) {
+  const { error } = await supabase.rpc('save_user_settings', {
+    p_event_updates: values.eventNotifications,
+    p_friend_updates: values.friendNotifications,
+    p_rating_reminders: values.ratingNotifications,
+    p_contact_visible: values.showContact
+  });
+
   return { error };
 }
 
