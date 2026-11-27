@@ -9,6 +9,7 @@
   let password = '';
   let confirmPassword = '';
   let error = '';
+  let notice = '';
   let loading = false;
 
   onMount(async () => {
@@ -64,7 +65,7 @@
         return;
       }
 
-      error = 'Account created. Check your email to confirm your account, then use the link to finish setup.';
+      notice = 'Account created. Check your email to confirm your account, then use the link to finish setup.';
     } catch (signupError) {
       console.error('Signup failed:', signupError);
       error = 'Could not create your account right now. Please try again.';
@@ -82,7 +83,8 @@
     <label>Email<input disabled={loading} type="email" bind:value={email} placeholder="you@example.com" autocomplete="email" /></label>
     <label>Password<input disabled={loading} type="password" bind:value={password} placeholder="At least 6 characters" autocomplete="new-password" /></label>
     <label>Confirm password<input disabled={loading} type="password" bind:value={confirmPassword} placeholder="Enter it again" autocomplete="new-password" /></label>
-    {#if error}<p class="error">{error}</p>{/if}
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
+    {#if notice}<p class="notice" role="status">{notice}</p>{/if}
     <button class="primary" type="submit" disabled={loading}>{loading ? 'Creating account…' : 'Create account'}</button>
   </form>
   <div class="divider"><span></span><small>ALREADY A MEMBER?</small><span></span></div>
@@ -90,5 +92,5 @@
 </AuthShell>
 
 <style>
-  .form{display:grid;gap:12px;margin-top:22px}.form label{display:grid;gap:6px;font:800 11px Quicksand}.form input{height:46px;width:100%;border:2px solid #171717;border-radius:15px;background:#fff;padding:0 12px;outline:0;font:700 13px Quicksand}.primary,.secondary{width:100%;border:2px solid #171717;border-radius:17px;padding:14px;font:900 13px Quicksand}.primary:disabled,.secondary:disabled{opacity:.55;cursor:not-allowed}.primary{background:#171717;color:#fff;box-shadow:-4px 5px 0 #a1a2a4}.secondary{background:#fff}.error{margin:-2px 0 0;color:#a13d3d;font:800 11px Quicksand}.divider{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:9px;margin:20px 0 13px}.divider span{height:1px;background:#ddd}.divider small{color:#888;font:800 9px Quicksand;letter-spacing:.08em}
+  .form{display:grid;gap:12px;margin-top:22px}.form label{display:grid;gap:6px;font:800 11px Quicksand}.form input{height:46px;width:100%;border:2px solid #171717;border-radius:15px;background:#fff;padding:0 12px;outline:0;font:700 13px Quicksand}.primary,.secondary{width:100%;border:2px solid #171717;border-radius:17px;padding:14px;font:900 13px Quicksand}.primary:disabled,.secondary:disabled{opacity:.55;cursor:not-allowed}.primary{background:#171717;color:#fff;box-shadow:-4px 5px 0 #a1a2a4}.secondary{background:#fff}.error{margin:-2px 0 0;color:#a13d3d;font:800 11px Quicksand}.notice{margin:-2px 0 0;color:#31734d;font:800 11px Quicksand}.divider{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:9px;margin:20px 0 13px}.divider span{height:1px;background:#ddd}.divider small{color:#888;font:800 9px Quicksand;letter-spacing:.08em}
 </style>
