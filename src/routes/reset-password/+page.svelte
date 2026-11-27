@@ -17,23 +17,29 @@
   let subscription = null;
 
   onMount(async () => {
-    subscription = onAuthStateChange((event, session) => {
-      if (event === 'PASSWORD_RECOVERY' && session) {
-        canReset = true;
-        checkingSession = false;
-      } else if (session && checkingSession) {
-        canReset = true;
-        checkingSession = false;
-      }
-    });
+    try {
+      subscription = onAuthStateChange((event, session) => {
+        if (event === 'PASSWORD_RECOVERY' && session) {
+          canReset = true;
+          checkingSession = false;
+        } else if (session && checkingSession) {
+          canReset = true;
+          checkingSession = false;
+        }
+      });
 
-    const session = await getSession();
-    if (session) {
-      canReset = true;
-    } else {
-      error = 'This password reset link is invalid or has expired.';
+      const session = await getSession();
+      if (session) {
+        canReset = true;
+      } else {
+        error = 'This password reset link is invalid or has expired.';
+      }
+    } catch (sessionError) {
+      console.error('Password reset session check failed:', sessionError);
+      error = 'Could not verify this reset link. Request a new password reset email and try again.';
+    } finally {
+      checkingSession = false;
     }
-    checkingSession = false;
   });
 
   onDestroy(() => {
@@ -59,17 +65,22 @@
     }
 
     loading = true;
-    const { error: passwordError } = await updatePassword(password);
-    loading = false;
+    try {
+      const { error: passwordError } = await updatePassword(password);
+      if (passwordError) {
+        error = passwordError.message || 'Could not update your password.';
+        return;
+      }
 
-    if (passwordError) {
-      error = passwordError.message || 'Could not update your password.';
-      return;
+      success = true;
+      password = '';
+      confirmPassword = '';
+    } catch (passwordError) {
+      console.error('Password update failed:', passwordError);
+      error = 'Could not update your password right now. Check your connection and try again.';
+    } finally {
+      loading = false;
     }
-
-    success = true;
-    password = '';
-    confirmPassword = '';
   }
 </script>
 
